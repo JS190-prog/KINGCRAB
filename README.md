@@ -13,6 +13,12 @@ runtime is local-first: credentials, live OpenCrab state, SQLite files, logs,
 and mobile pairing tokens stay in the ignored `.crabagent/` directory and are
 never part of a source checkout or commit.
 
+## Platform support
+
+**KINGCRAB currently supports macOS only.** The TUI, local `crabd` runtime,
+Codex integration, and onboarding flow are developed and tested on macOS.
+Windows and Linux are not currently supported or verified.
+
 ## Role system
 
 | Role | Responsibility | SOLTELU route |
