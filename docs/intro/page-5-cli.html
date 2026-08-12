@@ -1,0 +1,7 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>5. CrabAgent CLI</title><link rel="stylesheet" href="styles.css"></head><body><main>
+<nav aria-label="소개 페이지"><a href="index.html">목차</a><a href="page-1-ontology.html">1 온톨로지</a><a href="page-2-opencrab.html">2 OpenCrab</a><a href="page-3-localcrab.html">3 LocalCrab</a><a href="page-4-mcp.html">4 MCP CrabAgent</a><a aria-current="page" href="page-5-cli.html">5 CLI</a></nav>
+<p class="eyebrow">05 / local-first runtime</p><h1><code>crab</code>은 미션을 오래 붙잡는다</h1><p class="lede">CrabAgent CLI는 로컬 우선·온톨로지 지향 코딩 에이전트입니다. 공개 명령은 <code>crab</code>이고, 내부 durable runtime이 미션 상태를 보존합니다.</p>
+<div class="grid"><section class="card"><h3>시작</h3><p><code>crab</code>은 명령 덱을 열고, <code>crab run "목표"</code>는 미션을 제출합니다.</p></section><section class="card"><h3>상태</h3><p>미션 상태는 <code>.crabagent/state.sqlite3</code>에, 산출물은 mission별 artifacts에 둡니다.</p></section><section class="card"><h3>관찰</h3><p><code>status</code>, <code>inspect --latest</code>, <code>replay --latest</code>로 결과를 확인합니다.</p></section></div>
+<div class="evidence"><strong>확인된 근거:</strong> <a href="../../README.md">CrabAgent-CLI README</a>와 <a href="../../src/crabagent/cli.py">CLI 구현</a>.</div>
+<div class="pending"><strong>추가 확인 필요:</strong> 실제 실행 화면·성공 미션·배포 상태는 이 정적 자료가 증명하지 않습니다.</div>
+<footer>끝 · 모든 페이지는 근거와 미확인 범위를 함께 표시합니다.</footer></main></body></html>

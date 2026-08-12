@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "crabagent-cli"
+version = "0.7.0"
+description = "Ontology-first, durable agent colony runtime and CLI panel."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ALEXAI" }]
+dependencies = [
+  "rich>=13.7,<16",
+  "textual>=8.0,<9",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.2,<9"]
+
+[project.scripts]
+crab = "crabagent.cli:app"
+kingcrab = "crabagent.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crabagent"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]

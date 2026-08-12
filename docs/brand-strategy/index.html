@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="AI 시대 브랜드 마케팅 전략 — QUEEN ontology workspace">
+  <title>BRAND//50 — AI 브랜드 전략</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar"><a class="brand" href="#p0">BRAND<span>//50</span></a><div class="status"><i></i> QUEEN / EVIDENCE MODE</div></header>
+    <main id="app" aria-live="polite"></main>
+    <footer><span>Brand project · marketing_brand_transformer_linearization</span><span id="counter"></span></footer>
+  </div>
+  <script>
+    const pages = [
+      {k:'01',ey:'THE THESIS',title:'브랜드는 이제<br><em>응답하는 시스템</em>이다',body:'50개의 연결을 캠페인 아이디어가 아니라, 관찰하고 학습하는 브랜드 운영체계로 바꾼다.',cards:[['핵심 이동','메시지 생산 → 맥락에 맞는 응답'],['결정 기준','모든 주장에 근거 상태를 부여'],['오늘의 질문','AI가 대신 말할 때, 무엇이 우리다운가?']]},
+      {k:'02',ey:'AUDIENCE CONTEXT',title:'고객을 세그먼트가 아닌<br><em>상황</em>으로 읽는다',body:'Audience Context는 사람을 고정된 타깃이 아니라 순간·욕구·제약의 조합으로 본다.',cards:[['상황','지금 무엇을 하려는가'],['긴장','무엇이 선택을 막는가'],['신호','어떤 말과 행동이 변하고 있는가']]},
+      {k:'03',ey:'CULTURAL SIGNAL',title:'변화를 예측하지 말고<br><em>신호를 포착</em>한다',body:'Cultural Signal → 해석 → 기회. AI는 신호를 넓게 모으고, 사람은 의미와 경계를 결정한다.',cards:[['수집','검색·대화·커뮤니티 신호'],['해석','반복되는 맥락과 반론'],['기회','브랜드가 개입할 만한 간극']]},
+      {k:'04',ey:'PROPOSITION',title:'좋은 포지셔닝은<br><em>증명 가능한 약속</em>이다',body:'문제와 해결가치를 한 문장으로 만들고, 증거 청크와 연결해 과장을 차단한다.',cards:[['문제','고객의 실제 마찰'],['약속','우리가 바꾸는 결과'],['증명','출처·사례·한계']]},
+      {k:'05',ey:'CONTENT SYSTEM',title:'콘텐츠를 많이 만들지 말고<br><em>흐르게</em> 만든다',body:'하나의 메시지가 포맷과 채널을 바꾸며 재사용되는 Content System을 만든다.',cards:[['Message','한 문장 중심축'],['Format','숏폼·롱폼·대화형'],['Channel','발견 → 신뢰 → 전환']]},
+      {k:'06',ey:'AI EXPERIENCE',title:'개인화의 시작은<br><em>동의와 기억</em>이다',body:'AI Experience는 맞춤형 답변보다 먼저 데이터 동의, 기억 범위, 설명 가능성을 설계한다.',cards:[['Consent','무엇을 기억할지 선택'],['Memory','브랜드·고객 맥락의 경계'],['Response','개인화된 다음 행동']]},
+      {k:'07',ey:'COMMUNITY LOOP',title:'고객을 도달률이 아닌<br><em>기여자</em>로 만든다',body:'참여 → 기여 → 확산의 루프가 브랜드 자산이 된다. 보상보다 소속감과 영향력을 설계한다.',cards:[['참여','질문에 답하고'],['기여','경험을 남기고'],['확산','다음 사람의 결정을 돕는다']]},
+      {k:'08',ey:'TRUST & GOVERNANCE',title:'신뢰는 카피가 아니라<br><em>인터페이스</em>다',body:'출처, 검토 상태, 공개 범위를 UI에 드러내면 브랜드의 AI 사용이 검증 가능해진다.',cards:[['확인','확인된 근거'],['가설','검증할 주장'],['미확인','보류하고 추가 확인']]},
+      {k:'09',ey:'EXPERIMENT',title:'캠페인을 런칭하지 말고<br><em>학습을 런칭</em>한다',body:'가설 → 실행 → 측정 → 학습. 숫자를 장식하지 않고 다음 의사결정과 연결한다.',cards:[['Hypothesis','무엇이 바뀔까'],['Signal','무슨 행동을 볼까'],['Learn','무엇을 중단·확대할까']]},
+      {k:'10',ey:'90-DAY ROADMAP',title:'작게 증명하고<br><em>빠르게 연결</em>한다',body:'90일 동안 하나의 고객 상황과 하나의 약속을 골라, 근거가 남는 AI 브랜드 루프를 만든다.',cards:[['01–30','맥락·약속·증거 정리'],['31–60','AI 경험·콘텐츠 실험'],['61–90','학습 공유·확장 판단']]}
+    ];
+    const app=document.querySelector('#app'), counter=document.querySelector('#counter');
+    function render(){const i=Math.max(0,Math.min(9,Number(location.hash.slice(2))||0)),p=pages[i]; app.innerHTML=`<section class="hero"><div class="eyebrow">${p.k} / ${p.ey}</div><h1>${p.title}</h1><p class="lede">${p.body}</p><div class="grid">${p.cards.map((c,n)=>`<article class="card"><b>0${n+1}</b><h2>${c[0]}</h2><p>${c[1]}</p></article>`).join('')}</div><div class="evidence"><strong>근거 상태 · ${i===0?'확인':'가설'}</strong><span>${i===0?'사용자 제공 미션 및 선택된 Brand 프로젝트':'실제 온톨로지 청크 연결 전 — 전략 가설로 표시'}</span></div></section><nav class="pager"><a class="prev" href="#p${Math.max(0,i-1)}" ${i===0?'aria-disabled="true"':''}>← 이전</a><div class="dots">${pages.map((_,n)=>`<a href="#p${n}" class="${n===i?'active':''}" aria-label="${n+1}페이지"></a>`).join('')}</div><a class="next" href="#p${Math.min(9,i+1)}" ${i===9?'aria-disabled="true"':''}>다음 →</a></nav>`; counter.textContent=`${String(i+1).padStart(2,'0')} / 10`; document.title=`${p.ey} — BRAND//50`;}
+    addEventListener('hashchange',render); if(!location.hash) location.hash='#p0'; render();
+  </script>
+</body>
+</html>

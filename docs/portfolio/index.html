@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="ALEXAI — 근거를 실행 가능한 시스템으로 바꾸는 사람">
+  <title>ALEXAI — Evidence to Action</title>
+  <style>
+    :root{color-scheme:dark;--bg:#080a10;--panel:#111722;--line:#283448;--text:#f4f7fb;--muted:#9aa8ba;--mint:#91f2c9;--yellow:#e5ed78;--blue:#9eb5ff}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#20274b 0,#080a10 48%);color:var(--text);font:16px/1.6 Inter,system-ui,sans-serif}.wrap{max-width:1180px;margin:auto;padding:28px 26px 54px}.top{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:18px}.logo{font-weight:800;letter-spacing:.12em}.logo b{color:var(--mint)}.tag{color:var(--muted);font-size:.78rem;letter-spacing:.12em}.hero{padding:88px 0 55px}.eyebrow{color:var(--mint);font-size:.76rem;letter-spacing:.16em;font-weight:700}.hero h1{font-size:clamp(3rem,8vw,7rem);line-height:.94;letter-spacing:-.07em;margin:18px 0 24px;max-width:950px}.hero h1 em{font-style:normal;color:var(--yellow)}.hero p{max-width:690px;color:var(--muted);font-size:1.2rem}.toolbar{display:flex;gap:9px;flex-wrap:wrap;margin:25px 0}.filter{border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--muted);padding:8px 13px;cursor:pointer}.filter.active,.filter:hover{background:var(--mint);border-color:var(--mint);color:#07110d}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:15px}.card{background:linear-gradient(145deg,rgba(21,29,44,.95),rgba(12,16,25,.95));border:1px solid var(--line);border-radius:18px;padding:22px;min-height:205px}.card .num{color:var(--blue);font-size:.8rem}.card h2{font-size:1.25rem;margin:17px 0 6px}.card p{color:var(--muted);margin:0 0 15px}.chips{display:flex;gap:6px;flex-wrap:wrap}.chip{font-size:.72rem;color:var(--mint);border:1px solid #315a50;border-radius:6px;padding:2px 7px}.evidence{margin-top:32px;border-left:2px solid var(--yellow);background:rgba(229,237,120,.05);padding:13px 16px;color:var(--muted);font-size:.87rem}.evidence strong{color:var(--yellow);margin-right:10px}footer{display:flex;justify-content:space-between;border-top:1px solid var(--line);margin-top:72px;padding-top:18px;color:#68758a;font-size:.76rem}@media(max-width:760px){.wrap{padding:20px 16px}.hero{padding:60px 0 35px}.grid{grid-template-columns:1fr}.tag{display:none}footer{display:block}footer span{display:block;margin-top:6px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top"><div class="logo">ALEXAI <b>/ KINGCRAB</b></div><div class="tag">152 PACKS · ONE OPERATING SYSTEM</div></header>
+    <main>
+      <section class="hero"><div class="eyebrow">ALEXAI · EVIDENCE TO ACTION</div><h1>나는 지식을 <em>검증 가능한 행동</em>으로 바꾼다</h1><p>152개 팩을 넓게 바라보되, 결론은 관측된 근거에서만 출발한다. 로컬 우선 런타임과 OpenCrab MCP를 연결해 생각을 기록하고, 작은 실행으로 만들고, 실제 결과로 다시 확인한다.</p></section>
+      <div class="toolbar" role="group" aria-label="기술 영역 필터"><button class="filter active" data-filter="all">전체</button><button class="filter" data-filter="runtime">Runtime</button><button class="filter" data-filter="ontology">Ontology</button><button class="filter" data-filter="interface">Interface</button><button class="filter" data-filter="quality">Quality</button></div>
+      <section class="grid" id="stack" aria-live="polite">
+        <article class="card" data-kind="runtime"><span class="num">01 / HOW I WORK</span><h2>작게 만들고 오래 남긴다</h2><p>미션·세션·산출물·검증을 durable state로 남겨 실패해도 마지막 확인 지점에서 복구한다.</p><div class="chips"><span class="chip">local-first</span><span class="chip">daemon</span><span class="chip">recovery</span></div></article>
+        <article class="card" data-kind="ontology"><span class="num">02 / HOW I THINK</span><h2>팩은 맥락, 근거가 판단</h2><p>Fable5xGLM5.2를 우선 맥락으로 삼고, 152개 팩의 폭을 실제 MCP receipt와 구분해 다룬다.</p><div class="chips"><span class="chip">152 packs</span><span class="chip">MCP</span><span class="chip">evidence-first</span></div></article>
+        <article class="card" data-kind="ontology"><span class="num">03 / MY METHOD</span><h2>Source → Pack → Action</h2><p>목표를 evidence·decision·verification 슬롯으로 쪼개고, 확인된 것만 다음 행동으로 승격한다.</p><div class="chips"><span class="chip">goal graph</span><span class="chip">receipts</span><span class="chip">bounded</span></div></article>
+        <article class="card" data-kind="interface"><span class="num">04 / MY INTERFACE</span><h2>KINGCRAB Colony</h2><p>KING이 목표를 묶고 QUEEN이 맥락을 공급하며 WORKER가 한정된 변경을 실행한다.</p><div class="chips"><span class="chip">KING</span><span class="chip">QUEEN</span><span class="chip">WORKER</span></div></article>
+        <article class="card" data-kind="interface"><span class="num">05 / MY REACH</span><h2>CLI에서 제품까지</h2><p><code>crab</code>와 <code>kingcrab</code>을 통해 터미널의 사고 루프를 사람이 읽는 인터페이스로 만든다.</p><div class="chips"><span class="chip">Python</span><span class="chip">Textual</span><span class="chip">Typer</span></div></article>
+        <article class="card" data-kind="quality"><span class="num">06 / MY STANDARD</span><h2>완료는 검증 뒤에 온다</h2><p>파일·focused test·receipt를 다시 읽는다. 화면의 라벨이나 모델의 말만으로 완료를 선언하지 않는다.</p><div class="chips"><span class="chip">pytest</span><span class="chip">Oracle</span><span class="chip">no invented metrics</span></div></article>
+        <article class="card" data-kind="runtime"><span class="num">07 / MY CRAFT</span><h2>복잡성을 경계로 바꾼다</h2><p>외부 MCP와 로컬 실행을 분리하고, 권한·범위·쓰기 경계를 명시해 안전하게 연결한다.</p><div class="chips"><span class="chip">contracts</span><span class="chip">scope</span><span class="chip">approval</span></div></article>
+        <article class="card" data-kind="quality"><span class="num">08 / MY PROMISE</span><h2>모르면 멈춘다</h2><p>근거가 비어 있거나 graph gate가 막히면 추측으로 메우지 않고 GAP과 다음 확인을 남긴다.</p><div class="chips"><span class="chip">claim gate</span><span class="chip">GAPS</span><span class="chip">traceability</span></div></article>
+        <article class="card" data-kind="runtime"><span class="num">09 / OUTPUT</span><h2>생각을 공유 가능한 결과로</h2><p>문서·포트폴리오·CLI·팩 흐름을 하나의 운영체계로 묶어 다른 사람이 확인하고 이어갈 수 있게 한다.</p><div class="chips"><span class="chip">ALEXAI</span><span class="chip">OpenCrab</span><span class="chip">delivery</span></div></article>
+      </section>
+      <div class="evidence"><strong>Evidence basis</strong> Queen handoff의 152개 팩 미션 맥락과 README.md · docs/advice-for-alex.md · pyproject.toml · src/crabagent/ · tests/ — 팩 개별 내용, 성능·고객·배포 수치는 이 산출물에서 주장하지 않습니다.</div>
+    </main>
+    <footer><span>ALEXAI / KINGCRAB · local source snapshot</span><span>source-led · no invented metrics</span></footer>
+  </div>
+  <script>const buttons=[...document.querySelectorAll('.filter')],cards=[...document.querySelectorAll('.card')];buttons.forEach(b=>b.addEventListener('click',()=>{buttons.forEach(x=>x.classList.toggle('active',x===b));const f=b.dataset.filter;cards.forEach(c=>c.hidden=f!=='all'&&c.dataset.kind!==f)}));</script>
+</body>
+</html>
