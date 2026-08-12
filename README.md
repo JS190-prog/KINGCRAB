@@ -15,9 +15,10 @@ never part of a source checkout or commit.
 
 ## Platform support
 
-**KINGCRAB currently supports macOS only.** The TUI, local `crabd` runtime,
-Codex integration, and onboarding flow are developed and tested on macOS.
-Windows and Linux are not currently supported or verified.
+**KINGCRAB supports macOS natively and Windows through WSL2.** The TUI,
+local `crabd` runtime, Codex integration, and onboarding flow run unchanged
+inside an Ubuntu WSL2 environment. Native Windows and standalone Linux are
+not currently supported or verified.
 
 ## Role system
 
@@ -349,6 +350,24 @@ crab
 
 Contributors should install the test extra inside a project virtual environment
 instead of changing unrelated user-level Python packages.
+
+### Windows via WSL2
+
+Windows users should use the supported WSL2 path. From an elevated PowerShell,
+install Ubuntu once, restart if Windows requests it, create the Ubuntu user,
+then run the repository bootstrap script:
+
+```powershell
+wsl --install -d Ubuntu
+
+# From a KINGCRAB checkout after the first Ubuntu launch:
+powershell -ExecutionPolicy Bypass -File .\scripts\install-wsl2.ps1 -Launch
+```
+
+The script installs the Linux prerequisites, clones or reuses
+`~/KINGCRAB` inside WSL2, creates a virtual environment, and starts the
+`crab` panel. See [the complete WSL2 guide](docs/windows-wsl2.md) for Codex
+login, OpenCrab setup, file locations, and troubleshooting.
 
 ## First run
 

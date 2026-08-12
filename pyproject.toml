@@ -12,6 +12,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "ALEXAI" }]
 classifiers = [
   "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
   "Environment :: Console",
   "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
