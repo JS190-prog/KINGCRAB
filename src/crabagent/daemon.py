@@ -38,6 +38,37 @@ from .protocol import runtime_paths, runtime_revision
 from .runtime import RuntimeService
 
 
+RUNTIME_API_VERSION = "kingcrab-runtime/1"
+RUNTIME_CAPABILITIES = (
+    "mission.list",
+    "mission.summary",
+    "mission.pending_requests",
+)
+MISSION_SUMMARY_FIELDS = (
+    "mission_id",
+    "objective",
+    "status",
+    "risk",
+    "session_id",
+    "created_at",
+    "updated_at",
+)
+PENDING_REQUEST_FIELDS = (
+    "request_id",
+    "request_type",
+    "method",
+    "created_at",
+)
+
+
+def _mission_summary(value: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value.get(key) for key in MISSION_SUMMARY_FIELDS if value.get(key) is not None}
+
+
+def _pending_request_summary(value: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value.get(key) for key in PENDING_REQUEST_FIELDS if value.get(key) is not None}
+
+
 class RuntimeRequestHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         try:
@@ -984,6 +1015,8 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
                 "version": __version__,
                 "runtime_revision": runtime_revision(),
                 "colony_protocol": COLONY_PROTOCOL_VERSION,
+                "runtime_api": RUNTIME_API_VERSION,
+                "capabilities": list(RUNTIME_CAPABILITIES),
                 "workspace": str(self.workspace),
             }
         if action == "initialize":
@@ -1201,6 +1234,37 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             )
         if action == "session.list":
             return {"sessions": self.service.store.list_sessions()}
+        if action == "mission.list":
+            session_id = str(payload.get("session_id") or "").strip()
+            rows = self.service.store.recent_missions(
+                limit=int(payload.get("limit") or 20),
+                session_id=session_id,
+            )
+            return {"missions": [_mission_summary(row) for row in rows]}
+        if action == "mission.summary":
+            mission_id = str(payload.get("mission_id") or "").strip()
+            if not mission_id:
+                raise ValueError("mission_id is required")
+            mission = self.service.store.mission(mission_id)
+            if mission is None:
+                raise ValueError("unknown mission: %s" % mission_id)
+            return {"mission": _mission_summary(mission)}
+        if action == "mission.pending_requests":
+            mission_id = str(payload.get("mission_id") or "").strip()
+            if not mission_id:
+                raise ValueError("mission_id is required")
+            mission = self.service.store.mission(mission_id)
+            if mission is None:
+                raise ValueError("unknown mission: %s" % mission_id)
+            session_id = str(mission.get("session_id") or "")
+            if not session_id:
+                return {"requests": []}
+            rows = [
+                row
+                for row in self.service.store.pending_requests(session_id)
+                if str(row.get("mission_id") or "") == mission_id
+            ]
+            return {"requests": [_pending_request_summary(row) for row in rows]}
         if action == "orchestration.plan":
             return self._orchestration_plan(payload)
         if action == "orchestration.run":

@@ -19,6 +19,13 @@ def test_daemon_protocol_runs_demo_and_replays_receipts(tmp_path: Path) -> None:
     try:
         client = DaemonClient(tmp_path)
         assert client.ping()
+        hello = client.request("ping")
+        assert hello["runtime_api"] == "kingcrab-runtime/1"
+        assert set(hello["capabilities"]) >= {
+            "mission.list",
+            "mission.summary",
+            "mission.pending_requests",
+        }
         session = client.request("session.ensure")
         configured = client.request(
             "session.configure",
@@ -38,6 +45,16 @@ def test_daemon_protocol_runs_demo_and_replays_receipts(tmp_path: Path) -> None:
             session_id=session["session_id"],
         )
         mission_id = result["mission"]["mission_id"]
+        listed = client.request("mission.list", session_id=session["session_id"], limit=10)
+        assert listed["missions"][0]["mission_id"] == mission_id
+        summary = client.request("mission.summary", mission_id=mission_id)
+        assert summary["mission"]["mission_id"] == mission_id
+        assert set(summary["mission"]) <= {
+            "mission_id", "objective", "status", "risk",
+            "session_id", "created_at", "updated_at",
+        }
+        pending = client.request("mission.pending_requests", mission_id=mission_id)
+        assert pending == {"requests": []}
         replay = client.request("replay", mission_id=mission_id)
         assert result["mission"]["status"] == "completed"
         snapshot = client.request(
@@ -59,6 +76,56 @@ def test_daemon_protocol_runs_demo_and_replays_receipts(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
+def test_mission_read_api_uses_updated_order_and_bounds_pending_payload(tmp_path: Path) -> None:
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    if paths["socket"].exists():
+        paths["socket"].unlink()
+    server = RuntimeServer(tmp_path, paths["socket"])
+    try:
+        session = server.dispatch({"action": "session.ensure", "payload": {}})
+        first = server.dispatch({
+            "action": "run_demo",
+            "payload": {"objective": "First durable mission", "session_id": session["session_id"]},
+        })
+        second = server.dispatch({
+            "action": "run_demo",
+            "payload": {"objective": "Second durable mission", "session_id": session["session_id"]},
+        })
+        first_id = first["mission"]["mission_id"]
+        second_id = second["mission"]["mission_id"]
+        with server.service.store.connection() as connection:
+            connection.execute("UPDATE missions SET updated_at = ? WHERE mission_id = ?", ("9999-12-31T23:59:59Z", first_id))
+        listed = server.dispatch({
+            "action": "mission.list",
+            "payload": {"session_id": session["session_id"], "limit": 2},
+        })
+        assert [row["mission_id"] for row in listed["missions"]] == [first_id, second_id]
+
+        server.service.store.add_runtime_request(
+            "request-sensitive",
+            session["session_id"],
+            second_id,
+            "approval",
+            "item/commandExecution/requestApproval",
+            "sensitive prompt must stay in crabd",
+            {"secret": "do-not-export"},
+        )
+        pending = server.dispatch({"action": "mission.pending_requests", "payload": {"mission_id": second_id}})
+        assert pending["requests"] == [{
+            "request_id": "request-sensitive",
+            "request_type": "approval",
+            "method": "item/commandExecution/requestApproval",
+            "created_at": pending["requests"][0]["created_at"],
+        }]
+        assert "payload" not in pending["requests"][0]
+        assert "prompt" not in pending["requests"][0]
+    finally:
+        server.server_close()
         if paths["socket"].exists():
             paths["socket"].unlink()
 

@@ -7,3 +7,4 @@ dist/
 build/
 .crabagent/
 .DS_Store
+local_artifacts/

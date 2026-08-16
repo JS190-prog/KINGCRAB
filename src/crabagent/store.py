@@ -1721,6 +1721,22 @@ class ColonyStore:
             ).fetchall()
         return [self._mission_row(row) for row in rows]
 
+    def recent_missions(self, limit: int = 20, session_id: str = "") -> List[Dict[str, Any]]:
+        """Return bounded mission history ordered by most recent durable activity."""
+        bounded = max(1, min(int(limit), 100))
+        with self.connection() as connection:
+            if session_id:
+                rows = connection.execute(
+                    "SELECT * FROM missions WHERE session_id = ? ORDER BY updated_at DESC LIMIT ?",
+                    (session_id, bounded),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM missions ORDER BY updated_at DESC LIMIT ?",
+                    (bounded,),
+                ).fetchall()
+        return [self._mission_row(row) for row in rows]
+
     def inspect(self, mission_id: str) -> Dict[str, Any]:
         mission = self.mission(mission_id)
         if mission is None:
