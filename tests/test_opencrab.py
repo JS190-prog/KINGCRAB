@@ -95,6 +95,8 @@ def test_ambient_scope_resolver_simplifies_goal_and_ranks_visible_packs(monkeypa
                             "packages": [
                                 {"package_id": "pack-generic", "title": "General Notes", "description": "misc"},
                                 {"package_id": "pack-strategy", "title": "사업 전략 설계", "description": "사업 모델과 전략"},
+                                {"package_id": "pack-duplicate", "title": "사업 전략 설계 duplicate", "duplicate_of": "pack-strategy"},
+                                {"package_id": "pack-derived", "title": "사업 전략 설계 derived", "metadata": {"derived_from": "pack-strategy"}},
                                 {"package_id": "pack-fable", "title": "Fable5xGLM5.2", "description": "agent context"},
                             ],
                         }
@@ -115,6 +117,37 @@ def test_ambient_scope_resolver_simplifies_goal_and_ranks_visible_packs(monkeypa
     assert result["scope_mode"] == "workspace_auto_resolved"
     assert result["selected_package_ids"] == ["pack-strategy", "pack-fable"]
     assert result["selected_titles"] == ["사업 전략 설계", "Fable5xGLM5.2"]
+    assert result["candidate_count"] == 5
+    assert result["excluded_noncanonical_count"] == 2
+
+
+def test_default_scope_excludes_same_source_derived_pack(monkeypatch, tmp_path: Path) -> None:
+    class ScopeClient:
+        def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+            if name == "opencrab_status":
+                return {"status": "ok", "tier": "enterprise", "admin_all_customers": False}
+            if name == "opencrab_project_manage":
+                return {
+                    "status": "ok",
+                    "projects": [{
+                        "project_id": "project-1",
+                        "packages": [
+                            {"package_id": "pack-canonical", "title": "원문 전략", "source_package_id": "pack-canonical"},
+                            {"package_id": "pack-derived", "title": "파생 전략", "lineage": {"source_package_id": "pack-canonical"}},
+                        ],
+                    }],
+                }
+            raise AssertionError(name)
+
+    monkeypatch.setattr(opencrab, "mcp_inventory", lambda: [{"name": "OpenCrab", "state": "enabled"}])
+    result = opencrab.resolve_opencrab_package_scope(
+        "전략을 찾아줘",
+        workspace=tmp_path,
+        client_factory=lambda: ScopeClient(),
+    )
+
+    assert result["selected_package_ids"] == ["pack-canonical"]
+    assert result["excluded_noncanonical_count"] == 1
 
 
 class CompleteLiveCatalogClient:

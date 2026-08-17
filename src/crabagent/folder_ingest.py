@@ -237,7 +237,7 @@ def stage_folder(folder: Path, staging_root: Path, *, run_id: Optional[str] = No
     skipped: List[Dict[str, Any]] = []
 
     for path in _iter_source_files(root):
-        relative = str(path.relative_to(root))
+        relative = path.relative_to(root).as_posix()
         try:
             size = path.stat().st_size
             if size > MAX_FILE_BYTES:

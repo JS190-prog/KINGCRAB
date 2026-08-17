@@ -30,6 +30,34 @@ def test_workspace_observer_reports_real_added_modified_and_deleted_files(tmp_pa
     assert change["deleted_count"] == 1
 
 
+def test_workspace_observer_tracks_approved_crabagent_artifact_only(tmp_path: Path) -> None:
+    runtime = tmp_path / ".crabagent"
+    artifacts = runtime / "artifacts"
+    mission_artifacts = artifacts / "mission-internal"
+    mission_artifacts.mkdir(parents=True)
+    (runtime / "state.sqlite3").write_text("before\n", encoding="utf-8")
+    (mission_artifacts / "worker_result.md").write_text("before\n", encoding="utf-8")
+
+    before = capture_workspace(tmp_path)
+    (runtime / "state.sqlite3").write_text("after\n", encoding="utf-8")
+    (mission_artifacts / "worker_result.md").write_text("after\n", encoding="utf-8")
+    target = artifacts / "host_current_model_e2e.txt"
+    target.write_text("host-current-model-e2e-ok\n", encoding="utf-8")
+
+    after = capture_workspace(tmp_path)
+    change = diff_workspace(before, after)
+
+    assert ".crabagent/state.sqlite3" not in after["files"]
+    assert not any(path.startswith(".crabagent/artifacts/mission-") for path in after["files"])
+    assert ".crabagent/artifacts/host_current_model_e2e.txt" in after["files"]
+    assert change["changed_file_count"] == 1
+    assert change["added_count"] == 1
+    assert change["modified_count"] == 0
+    assert change["deleted_count"] == 0
+    assert [(row["path"], row["status"]) for row in change["changed_files"]] == [
+        (".crabagent/artifacts/host_current_model_e2e.txt", "added")
+    ]
+
 def test_write_benchmark_copy_excludes_runtime_and_nested_output(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -225,9 +253,60 @@ def test_positive_write_survives_negative_scope_constraint() -> None:
     assert "WORKER" in plan.stages
 
 
+def test_negated_opencrab_and_external_scope_do_not_activate_routing() -> None:
+    plan = classify_goal(
+        "Create exactly one synthetic file named current_model_e2e_20260817.txt in the KINGCRAB mission workspace containing exactly the single line CURRENT_MODEL_E2E_OK. Do not access or modify OpenCrab, external services, user data, or any other file. Verify the bounded workspace change and complete through the normal Oracle gate."
+    )
+    assert plan.requires_write is True
+    assert plan.ontology_required is False
+    assert plan.external_scouting is False
+    assert "QUEEN" not in plan.stages
+    assert "WORKER" in plan.stages
+
+
+def test_without_opencrab_or_web_does_not_activate_knowledge_scope() -> None:
+    plan = classify_goal("Create local.txt with OK only, without OpenCrab, web, internet, or external research.")
+    assert plan.requires_write is True
+    assert plan.ontology_required is False
+    assert plan.external_scouting is False
+
+
+def test_korean_negated_opencrab_scope_does_not_activate_ontology() -> None:
+    plan = classify_goal("result.txt를 만들어. 오픈크랩을 사용하지 말고 외부 서비스 없이 로컬 파일만 수정해.")
+    assert plan.requires_write is True
+    assert plan.ontology_required is False
+    assert plan.external_scouting is False
+
+
+def test_positive_opencrab_and_external_signals_still_activate_routing() -> None:
+    plan = classify_goal("Use OpenCrab evidence and external web research to analyze the architecture.")
+    assert plan.ontology_required is True
+    assert plan.external_scouting is True
+
+
 def test_english_do_not_create_is_not_write_intent() -> None:
     plan = classify_goal("Check OpenCrab evidence and do not create files.")
     assert plan.requires_write is False
+
+
+@pytest.mark.parametrize(
+    "objective",
+    [
+        "변경 내역을 확인해줘",
+        "수정된 파일 목록을 보여줘",
+        "변경된 내용을 읽어줘",
+        "Show the update history",
+        "Show the modified files",
+        "List the changes",
+    ],
+)
+def test_change_history_and_observed_changes_are_read_only(objective: str) -> None:
+    assert classify_goal(objective).requires_write is False
+
+
+def test_imperative_change_request_remains_write_intent() -> None:
+    assert classify_goal("프로젝트 설정을 수정해줘").requires_write is True
+    assert classify_goal("Update the project config").requires_write is True
 
 
 def test_ontology_requests_leave_direct_chat_in_auto_mode() -> None:
@@ -643,6 +722,42 @@ def test_adaptive_colony_executes_only_the_required_model_turns(tmp_path: Path) 
     assert snapshot["mission"]["oracle_result_artifact_id"]
     model_receipt = next(row for row in snapshot["tool_receipts"] if row["tool_name"] == "codex.app-server.turn")
     assert model_receipt["observed"]["prompt_chars"] > 0
+
+
+def test_host_model_policy_never_starts_codex_or_creates_codex_attempt(tmp_path: Path) -> None:
+    service = RuntimeService(tmp_path)
+    session = service.store.create_session(interaction_mode="colony", model_policy="host")
+
+    class Bridge:
+        thread_id = ""
+        last_start_mode = "not_started"
+
+        def start(self) -> str:
+            raise AssertionError("host-model sessions must not start Codex")
+
+        def run_turn(self, *args, **kwargs):
+            raise AssertionError("host-model sessions must not invoke Codex")
+
+    snapshot = ColonyExecutor(
+        service,
+        session["session_id"],
+        Bridge(),
+        threading.Event(),
+    ).run(
+        "Design a security architecture migration and verify the result",
+        max_workers=1,
+        worker_policy="fixed",
+    )
+
+    assert snapshot["mission"]["status"] == "failed"
+    assert snapshot["attempts"] == []
+    assert not any(row["tool_name"] == "codex.app-server.turn" for row in snapshot["tool_receipts"])
+    assert any(
+        row.event_type == "host_model_execution_required"
+        for row in service.store.events(snapshot["mission"]["mission_id"])
+    )
+    messages = service.store.messages(session["session_id"])
+    assert any("HOST_MODEL_EXECUTOR_UNAVAILABLE" in row["content"] for row in messages)
 
 
 def test_ontology_colony_requires_direct_mcp_receipt(tmp_path: Path) -> None:

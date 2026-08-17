@@ -17,6 +17,7 @@ import typer
 from . import __version__
 from .identity import COLONY_PROTOCOL_VERSION
 from .codex_app_server import CodexAppServerSession
+from .host_model import HostModelSession
 from .colony import ColonyExecutor
 from .conversation import ConversationExecutor, interaction_kind
 from .continuation import continuation_intent
@@ -34,8 +35,9 @@ from .onboarding import (
     write_endpoint,
 )
 from .orchestration import OrchestrationStore, normalize_children, orchestration_id, summarize, utc_now
-from .protocol import runtime_paths, runtime_revision
+from .protocol import USE_UNIX_SOCKET, runtime_paths, runtime_revision
 from .runtime import RuntimeService
+from .workspace_defaults import default_workspace, is_legacy_tb_scratch_root
 
 
 RUNTIME_API_VERSION = "kingcrab-runtime/1"
@@ -43,6 +45,7 @@ RUNTIME_CAPABILITIES = (
     "mission.list",
     "mission.summary",
     "mission.pending_requests",
+    "mission.host_turn",
 )
 MISSION_SUMMARY_FIELDS = (
     "mission_id",
@@ -186,16 +189,21 @@ def _crab_doc_list(workspace: Path) -> Dict[str, Any]:
     return {"status": "ok", "count": len(documents), "documents": documents, "root": str(root)}
 
 
-class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+_RuntimeServerBase = socketserver.UnixStreamServer if USE_UNIX_SOCKET else socketserver.ThreadingTCPServer
+
+
+class RuntimeServer(_RuntimeServerBase):
     daemon_threads = True
+    allow_reuse_address = True
 
     def __init__(self, workspace: Path, socket_path: Path, *, opencrab_inspector: Optional[OpenCrabInspector] = None, pack_builder: Optional[OpenCrabPackBuilder] = None) -> None:
         self.workspace = workspace.resolve()
+        self._endpoint_path = runtime_paths(self.workspace)["endpoint"]
         self.service = RuntimeService(self.workspace)
         self.service.initialize()
         self.service.store.expire_pending_requests()
         self.service.store.reconcile_interrupted_runtime()
-        self._bridges: Dict[str, CodexAppServerSession] = {}
+        self._bridges: Dict[str, Any] = {}
         self._jobs: Dict[str, threading.Thread] = {}
         self._cancels: Dict[str, threading.Event] = {}
         self._pack_watchers: Dict[str, threading.Thread] = {}
@@ -208,13 +216,34 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.opencrab_inspector = opencrab_inspector or OpenCrabInspector(workspace=self.workspace)
         self.pack_builder = pack_builder or OpenCrabPackBuilder(self.opencrab_inspector.client_factory, self.workspace)
         self._orchestrations.reconcile_after_restart()
-        super().__init__(str(socket_path), RuntimeRequestHandler)
+        address: Any = str(socket_path) if USE_UNIX_SOCKET else ("127.0.0.1", 0)
+        super().__init__(address, RuntimeRequestHandler)
+        if not USE_UNIX_SOCKET:
+            self._endpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            self._endpoint_path.write_text(
+                json.dumps(
+                    {
+                        "transport": "tcp",
+                        "host": "127.0.0.1",
+                        "port": int(self.server_address[1]),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
     def server_close(self) -> None:
         self._pack_watch_stop.set()
         with self._state_lock:
             for stop in self._orchestration_stops.values():
                 stop.set()
+        if not USE_UNIX_SOCKET:
+            try:
+                endpoint = json.loads(self._endpoint_path.read_text(encoding="utf-8"))
+                if int(endpoint.get("port")) == int(self.server_address[1]):
+                    self._endpoint_path.unlink()
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                pass
         super().server_close()
 
     def _observe_pack_upload(self, record: Dict[str, Any], upload_session_id: str = "") -> Dict[str, Any]:
@@ -308,27 +337,54 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             self._pack_watchers[run_id] = watcher
             watcher.start()
 
-    def _session(self, session_id: str = "") -> Dict[str, Any]:
+    def _session(self, session_id: str = "", project_root_path: str = "") -> Dict[str, Any]:
         session = self.service.store.session(session_id) if session_id else self.service.store.latest_session()
-        session = session or self.service.store.create_session()
+        default_root = project_root_path or str(self.workspace)
+        if is_legacy_tb_scratch_root(default_root):
+            default_root = str(self.workspace)
+        session = session or self.service.store.create_session(project_root_path=default_root)
+        current_root = str(session.get("project_root_path") or "").strip()
+        if not session.get("project_id") and (not current_root or is_legacy_tb_scratch_root(current_root)):
+            session = self.service.store.update_session(
+                str(session["session_id"]),
+                project_root_path=default_root,
+            )
         session["ontology_context"] = self.service.store.ontology_context(str(session["session_id"]))
         return session
 
-    def _bridge(self, session: Dict[str, Any]) -> CodexAppServerSession:
+    def _bridge(self, session: Dict[str, Any]) -> Any:
         session_id = str(session["session_id"])
+        executor_policy = str(session.get("executor_policy") or "codex").strip().lower()
+        if executor_policy not in {"codex", "host"}:
+            raise RuntimeError("unsupported executor_policy: %s" % executor_policy)
+        project_root = Path(str(session.get("project_root_path") or self.workspace)).expanduser()
+        if not project_root.is_dir():
+            project_root = self.workspace
         with self._state_lock:
             bridge = self._bridges.get(session_id)
+            expected_type = HostModelSession if executor_policy == "host" else CodexAppServerSession
+            if bridge is not None and not isinstance(bridge, expected_type):
+                bridge.close()
+                self._bridges.pop(session_id, None)
+                bridge = None
             if bridge is None:
-                executable = shutil.which("codex")
-                if not executable:
-                    raise RuntimeError("Codex CLI is unavailable; install or expose `codex` on PATH")
-                bridge = CodexAppServerSession(
-                    executable,
-                    self.workspace,
-                    thread_id=str(session.get("codex_thread_id") or ""),
-                    mcp_policy=str(session.get("mcp_policy") or "auto"),
-                    mcp_servers=[str(row["name"]) for row in mcp_inventory()],
-                )
+                if executor_policy == "host":
+                    bridge = HostModelSession(
+                        thread_id=str(session.get("codex_thread_id") or ""),
+                        mcp_policy=str(session.get("mcp_policy") or "auto"),
+                        project_root=str(project_root.resolve()),
+                    )
+                else:
+                    executable = shutil.which("codex")
+                    if not executable:
+                        raise RuntimeError("Codex CLI is unavailable; install or expose `codex` on PATH")
+                    bridge = CodexAppServerSession(
+                        executable,
+                        project_root,
+                        thread_id=str(session.get("codex_thread_id") or ""),
+                        mcp_policy=str(session.get("mcp_policy") or "auto"),
+                        mcp_servers=[str(row["name"]) for row in mcp_inventory()],
+                    )
                 self._bridges[session_id] = bridge
             return bridge
 
@@ -1244,8 +1300,14 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             }
             return overview
         if action == "session.ensure":
-            return self._session(str(payload.get("session_id") or ""))
+            return self._session(
+                str(payload.get("session_id") or ""),
+                str(payload.get("project_root_path") or self.workspace),
+            )
         if action == "session.create":
+            requested_project_root = str(payload.get("project_root_path") or self.workspace)
+            if not payload.get("project_id") and not payload.get("project_name") and is_legacy_tb_scratch_root(requested_project_root):
+                requested_project_root = str(self.workspace)
             created = self.service.store.create_session(
                 title=str(payload.get("title") or "CrabAgent session"),
                 model_policy=str(payload.get("model_policy") or "auto"),
@@ -1256,7 +1318,7 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
                 worker_policy=str(payload.get("worker_policy") or "auto"),
                 project_id=str(payload.get("project_id") or ""),
                 project_name=str(payload.get("project_name") or ""),
-                project_root_path=str(payload.get("project_root_path") or ""),
+                project_root_path=requested_project_root,
             )
             project_id = str(payload.get("project_id") or "")
             project_name = str(payload.get("project_name") or "").strip()
@@ -1264,7 +1326,7 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
                 project = self.service.store.ensure_project(
                     project_name or "Project",
                     project_id=project_id,
-                    root_path=str(payload.get("project_root_path") or ""),
+                    root_path=requested_project_root,
                 )
                 created = self.service.store.update_session(
                     str(created["session_id"]),
@@ -1318,6 +1380,38 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
                 if str(row.get("mission_id") or "") == mission_id
             ]
             return {"requests": [_pending_request_summary(row) for row in rows]}
+        if action == "mission.host_turn":
+            mission_id = str(payload.get("mission_id") or "").strip()
+            if not mission_id:
+                raise ValueError("mission_id is required")
+            mission = self.service.store.mission(mission_id)
+            if mission is None:
+                raise ValueError("unknown mission: %s" % mission_id)
+            session_id = str(mission.get("session_id") or "")
+            if not session_id:
+                return {"turn": None}
+            rows = [
+                row
+                for row in self.service.store.pending_requests(session_id)
+                if str(row.get("mission_id") or "") == mission_id
+                and str(row.get("request_type") or "") == "host_model_turn"
+                and str(row.get("method") or "") == "hostModel/turn"
+            ]
+            if len(rows) > 1:
+                raise RuntimeError("multiple pending host model turns for one mission")
+            if not rows:
+                return {"turn": None}
+            row = rows[0]
+            return {
+                "turn": {
+                    "request_id": row.get("request_id"),
+                    "request_type": row.get("request_type"),
+                    "method": row.get("method"),
+                    "prompt": row.get("prompt"),
+                    "payload": row.get("payload") or {},
+                    "created_at": row.get("created_at"),
+                }
+            }
         if action == "orchestration.plan":
             return self._orchestration_plan(payload)
         if action == "orchestration.run":
@@ -1384,14 +1478,33 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         if action == "session.configure":
             session_id = str(payload["session_id"])
             session = self._session(session_id)
+            current_executor = str(session.get("executor_policy") or "codex").strip().lower()
+            requested_executor = str(payload.get("executor_policy") or current_executor).strip().lower()
+            if requested_executor not in {"codex", "host"}:
+                raise ValueError("executor_policy must be codex or host")
+            with self._state_lock:
+                running = bool(self._jobs.get(session_id) and self._jobs[session_id].is_alive())
+                existing_bridge = self._bridges.get(session_id)
+            if running and requested_executor != current_executor:
+                raise RuntimeError("executor_policy cannot change while a mission is running")
+            requested_project_root = str(payload.get("project_root_path") or session.get("project_root_path") or self.workspace)
+            if not session.get("project_id") and is_legacy_tb_scratch_root(requested_project_root):
+                requested_project_root = str(self.workspace)
             updated = self.service.store.update_session(
                 session_id,
                 model_policy=str(payload.get("model_policy") or "auto"),
                 interaction_mode=str(payload.get("interaction_mode") or "auto"),
+                executor_policy=requested_executor,
                 cli_policy=str(payload.get("cli_policy") or session.get("cli_policy") or "auto"),
                 max_workers=max(1, min(int(payload.get("max_workers") or 3), 8)),
                 worker_policy=str(payload.get("worker_policy") or session.get("worker_policy") or "auto"),
+                project_root_path=requested_project_root,
             )
+            if requested_executor != current_executor and existing_bridge is not None:
+                with self._state_lock:
+                    bridge = self._bridges.pop(session_id, None)
+                if bridge is not None:
+                    bridge.close()
             requested_policy = str(payload.get("mcp_policy") or "auto")
             if requested_policy != str(session.get("mcp_policy") or "auto"):
                 return self._apply_mcp_policy(updated, requested_policy)
@@ -1444,11 +1557,17 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             request_id = str(payload["request_id"])
             bridge = self._bridges.get(session_id)
             if bridge is None:
-                raise RuntimeError("no live Codex bridge for session")
+                raise RuntimeError("no live model bridge for session")
+            pending = next((row for row in self.service.store.pending_requests(session_id) if row["request_id"] == request_id), {})
+            if not pending:
+                raise RuntimeError("unknown or already resolved runtime request")
+            method = str(pending.get("method") or "")
             if bool(payload.get("approve")):
-                pending = next((row for row in self.service.store.pending_requests(session_id) if row["request_id"] == request_id), {})
-                method = str(pending.get("method") or "")
-                if method == "mcpServer/elicitation/request":
+                if method == "hostModel/turn":
+                    result = dict(payload.get("result") or {})
+                    if not str(result.get("text") or "").strip():
+                        raise RuntimeError("host model turn requires non-empty result.text")
+                elif method == "mcpServer/elicitation/request":
                     result = {"action": "accept", **dict(payload.get("result") or {})}
                 elif method == "item/tool/requestUserInput":
                     result = dict(payload.get("result") or {})
@@ -1461,7 +1580,7 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             else:
                 bridge.reject(request_id, str(payload.get("reason") or "Declined by user"))
                 self.service.store.resolve_runtime_request(request_id, "declined")
-            return {"request_id": request_id, "resolved": True}
+            return {"request_id": request_id, "resolved": True, "method": method}
         if action == "events.since":
             return {
                 "events": self.service.store.events_after(
@@ -1524,7 +1643,7 @@ app = typer.Typer(add_completion=False, help="CrabAgent durable local runtime.")
 
 @app.command()
 def run(
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Run crabd in the foreground."""
     paths = runtime_paths(workspace)

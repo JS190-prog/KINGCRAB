@@ -112,11 +112,77 @@ def _scope_query_terms(objective: str) -> list[str]:
     return terms[:6]
 
 
+_PACK_LINEAGE_ID_FIELDS = {
+    "duplicate_of",
+    "duplicate_package_id",
+    "duplicate_pack_id",
+    "derived_from",
+    "derived_from_package_id",
+    "derived_from_pack_id",
+    "source_package_id",
+    "source_pack_id",
+    "parent_package_id",
+    "parent_pack_id",
+    "canonical_package_id",
+    "canonical_pack_id",
+}
+_PACK_LINEAGE_FLAG_FIELDS = {
+    "duplicate",
+    "is_duplicate",
+    "is_duplicate_pack",
+    "derived",
+    "is_derived",
+    "is_derivative",
+}
+_PACK_LINEAGE_STATUS_FIELDS = {
+    "derivation_status",
+    "lineage_type",
+    "raw_or_derived",
+    "pack_kind",
+}
+_PACK_NONCANONICAL_STATUSES = {"copy", "derived", "derivative", "duplicate", "fork", "generated"}
+
+
+def _pack_scope_exclusion_reason(row: Dict[str, Any]) -> str:
+    """Return a reason when a catalog row is not a canonical default-scope pack."""
+    package_id = str(row.get("package_id") or row.get("id") or "").strip()
+    pending: list[Any] = [row]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if not isinstance(current, (dict, list)) or id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, list):
+            pending.extend(current)
+            continue
+        for key, value in current.items():
+            normalized_key = re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).replace("-", "_").lower()
+            if normalized_key in _PACK_LINEAGE_FLAG_FIELDS and bool(value):
+                return f"noncanonical:{normalized_key}"
+            if normalized_key in _PACK_LINEAGE_ID_FIELDS:
+                values = value if isinstance(value, list) else [value]
+                if any(str(candidate or "").strip() and str(candidate).strip() != package_id for candidate in values):
+                    return f"noncanonical:{normalized_key}"
+            if normalized_key in _PACK_LINEAGE_STATUS_FIELDS:
+                status = str(value or "").strip().lower()
+                if status in _PACK_NONCANONICAL_STATUSES:
+                    return f"noncanonical:{normalized_key}"
+            if isinstance(value, (dict, list)):
+                pending.append(value)
+    origin = str(row.get("origin") or "").strip().lower()
+    if origin in _PACK_NONCANONICAL_STATUSES:
+        return "noncanonical:origin"
+    return ""
+
+
 def _rank_catalog_packs(packs: Iterable[Dict[str, Any]], terms: list[str], limit: int) -> list[Dict[str, Any]]:
     """Rank visible catalog metadata only; never inspect pack contents here."""
     scored: list[tuple[float, int, Dict[str, Any]]] = []
     for index, raw in enumerate(packs):
         if not isinstance(raw, dict) or not raw.get("package_id"):
+            continue
+        if _pack_scope_exclusion_reason(raw):
             continue
         title = str(raw.get("title") or "").lower()
         description = str(raw.get("description") or "").lower()
@@ -178,6 +244,7 @@ def resolve_opencrab_package_scope(
         "catalog_queries": [],
         "catalog_status": "skipped",
         "candidate_count": 0,
+        "excluded_noncanonical_count": 0,
         "selected_package_count": 0,
         "selected_package_ids": [],
         "selected_titles": [],
@@ -215,13 +282,19 @@ def resolve_opencrab_package_scope(
         base.update({"catalog_status": "unavailable", "error": last_error or "catalog returned no payload"})
         return base
     packs = (payload.get("packs") or {}).get("items") or []
-    ranked = _rank_catalog_packs(packs, terms, max(1, min(int(max_packages), 12)))
+    candidate_packs = [
+        row for row in packs
+        if isinstance(row, dict) and row.get("package_id")
+    ]
+    canonical_packs = [row for row in candidate_packs if not _pack_scope_exclusion_reason(row)]
+    ranked = _rank_catalog_packs(canonical_packs, terms, max(1, min(int(max_packages), 12)))
     base.update(
         {
             "catalog_status": str(payload.get("status") or "unknown"),
             "catalog_mode": payload.get("mode"),
             "catalog_query": payload.get("query") or base["catalog_queries"][-1],
-            "candidate_count": len([row for row in packs if isinstance(row, dict) and row.get("package_id")]),
+            "candidate_count": len(candidate_packs),
+            "excluded_noncanonical_count": len(candidate_packs) - len(canonical_packs),
             "selected_package_count": len(ranked),
             "selected_package_ids": [str(row.get("package_id")) for row in ranked],
             "selected_titles": [str(row.get("title") or "") for row in ranked],
@@ -548,7 +621,7 @@ class OpenCrabInspector:
 
     @staticmethod
     def _pack_row(row: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        normalized = {
             "package_id": row.get("package_id") or row.get("id"),
             "workspace_id": row.get("workspace_id") or row.get("workspace"),
             "owner_id_tail": row.get("owner_id_tail"),
@@ -563,7 +636,21 @@ class OpenCrabInspector:
             "snapshot": row.get("snapshot") or {},
             "tags": row.get("tags") or [],
             "marketplace_import": row.get("marketplace_import"),
+            "metadata": row.get("metadata") or {},
+            "lineage": row.get("lineage") or {},
+            "provenance": row.get("provenance") or {},
         }
+        for key in (
+            "duplicate_of", "duplicate_package_id", "duplicate_pack_id",
+            "derived_from", "derived_from_package_id", "derived_from_pack_id",
+            "source_package_id", "source_pack_id", "parent_package_id", "parent_pack_id",
+            "canonical_package_id", "canonical_pack_id", "duplicate", "is_duplicate",
+            "is_duplicate_pack", "derived", "is_derived", "is_derivative",
+            "derivation_status", "lineage_type", "raw_or_derived", "pack_kind",
+        ):
+            if key in row:
+                normalized[key] = row.get(key)
+        return normalized
 
     @classmethod
     def _project_row(cls, row: Dict[str, Any]) -> Dict[str, Any]:

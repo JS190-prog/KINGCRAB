@@ -5,7 +5,34 @@ from pathlib import Path
 import pytest
 
 from crabagent.daemon import RuntimeServer, _king_title, _mcp_policy_with
-from crabagent.protocol import DaemonClient, runtime_paths, start_daemon
+from crabagent.protocol import DaemonClient, USE_UNIX_SOCKET, runtime_paths, start_daemon
+
+
+def test_runtime_uses_a_supported_local_transport() -> None:
+    paths = runtime_paths(Path.cwd())
+    assert paths["transport"] in {"unix", "tcp"}
+    if USE_UNIX_SOCKET:
+        assert paths["transport"] == "unix"
+    else:
+        assert paths["transport"] == "tcp"
+        assert 45000 <= paths["port"] < 55000
+        assert paths["endpoint"].name == "crabd.endpoint.json"
+
+
+def test_session_ensure_rehomes_legacy_unassigned_tb_root(tmp_path: Path) -> None:
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    server = RuntimeServer(tmp_path, paths["socket"])
+    try:
+        server.service.store.create_session(
+            project_root_path=str(tmp_path / "scratch" / "FINAL-Bench-TB-S1"),
+        )
+        session = server.dispatch({"action": "session.ensure", "payload": {}})
+        assert session["project_root_path"] == str(tmp_path.resolve())
+    finally:
+        server.server_close()
+        if paths["socket"].exists():
+            paths["socket"].unlink()
 
 
 def test_daemon_protocol_runs_demo_and_replays_receipts(tmp_path: Path) -> None:
@@ -76,6 +103,101 @@ def test_daemon_protocol_runs_demo_and_replays_receipts(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
+def test_host_executor_runs_durable_model_turns_without_codex(tmp_path: Path) -> None:
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    server = RuntimeServer(tmp_path, paths["socket"])
+    try:
+        session = server.dispatch({"action": "session.ensure", "payload": {}})
+        assert session["project_root_path"] == str(tmp_path.resolve())
+        configured = server.dispatch({
+            "action": "session.configure",
+            "payload": {
+                "session_id": session["session_id"],
+                "model_policy": "host",
+                "executor_policy": "host",
+                "interaction_mode": "colony",
+                "mcp_policy": "off",
+                "max_workers": 1,
+            },
+        })
+        assert configured["model_policy"] == "host"
+        assert configured["executor_policy"] == "host"
+        hello = server.dispatch({"action": "ping", "payload": {}})
+        assert "mission.host_turn" in hello["capabilities"]
+
+        started = server.dispatch({
+            "action": "prompt.submit",
+            "payload": {
+                "session_id": session["session_id"],
+                "objective": "Create bounded_note.txt with one line hello",
+                "disposition": "start",
+                "interaction": "colony",
+            },
+        })
+        mission_id = str(started.get("mission_id") or "")
+        deadline = time.time() + 10.0
+        while not mission_id and time.time() < deadline:
+            rows = server.dispatch({
+                "action": "mission.list",
+                "payload": {"session_id": session["session_id"], "limit": 5},
+            })["missions"]
+            if rows:
+                mission_id = str(rows[0]["mission_id"])
+                break
+            time.sleep(0.02)
+        assert mission_id
+
+        answered = 0
+        while time.time() < deadline:
+            summary = server.dispatch({"action": "mission.summary", "payload": {"mission_id": mission_id}})["mission"]
+            if summary["status"] in {"completed", "failed", "cancelled"}:
+                break
+            host = server.dispatch({"action": "mission.host_turn", "payload": {"mission_id": mission_id}})["turn"]
+            if host:
+                assert host["payload"]["params"]["workspace"] == str(tmp_path.resolve())
+                assert host["payload"]["params"]["projectRoot"] == str(tmp_path.resolve())
+                (tmp_path / "bounded_note.txt").write_text("hello\n", encoding="utf-8")
+                server.dispatch({
+                    "action": "runtime.respond",
+                    "payload": {
+                        "session_id": session["session_id"],
+                        "request_id": host["request_id"],
+                        "approve": True,
+                        "result": {
+                            "text": "bounded host-model result",
+                            "model": "gpt-5.6-sol",
+                            "usage": {"totalTokens": 32},
+                        },
+                    },
+                })
+                answered += 1
+            else:
+                time.sleep(0.02)
+
+        snapshot = server.service.store.inspect(mission_id)
+        diagnostic_events = [
+            (row.event_type, row.actor, row.payload)
+            for row in server.service.store.events(mission_id)
+            if row.event_type in {"mission_cancelled", "soldier_stop_gate", "host_model_execution_required"}
+        ]
+        assert snapshot["mission"]["status"] == "completed", {
+            "status": snapshot["mission"]["status"],
+            "tasks": [(row["role"], row["status"]) for row in snapshot["tasks"]],
+            "executors": [row["executor"] for row in snapshot["attempts"]],
+            "events": diagnostic_events,
+        }
+        assert answered >= 1
+        assert snapshot["attempts"]
+        assert any(row["executor"] == "host_current_model" for row in snapshot["attempts"])
+        assert not any(row["executor"] == "codex_app_server" for row in snapshot["attempts"])
+        assert any(row["tool_name"] == "host.current-model.turn" for row in snapshot["tool_receipts"])
+    finally:
+        server.server_close()
         if paths["socket"].exists():
             paths["socket"].unlink()
 
@@ -227,7 +349,9 @@ def test_zero_model_mission_uses_preloaded_opencrab_context_without_runtime_endp
             },
         })
         assert submitted["status"] == "starting"
-        deadline = time.monotonic() + 3.0
+        # Windows thread startup and SQLite-backed local gates are slower than
+        # the POSIX path; keep this an integration bound rather than a race.
+        deadline = time.monotonic() + 10.0
         mission = None
         while time.monotonic() < deadline:
             rows = server.service.store.list_missions(limit=20)

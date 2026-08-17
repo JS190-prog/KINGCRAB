@@ -25,6 +25,7 @@ from .protocol import DaemonClient, start_daemon
 from .runtime import RuntimeService
 from .store import ColonyStore
 from .tui import run_tui
+from .workspace_defaults import default_workspace
 
 
 console = Console()
@@ -42,7 +43,7 @@ app.add_typer(mobile_app, name="mobile")
 @doc_app.command("import")
 def import_crab_doc(
     manifest_path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, resolve_path=True),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Import a CRAB DOC `crab-doc/v1` manifest into this KINGCRAB workspace."""
     result = start_daemon(workspace).request("doc.import", manifest_path=str(manifest_path))
@@ -55,7 +56,7 @@ def import_crab_doc(
 
 @doc_app.command("list")
 def list_crab_docs(
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
     raw_json: bool = typer.Option(False, "--json", help="Print the document inventory as JSON."),
 ) -> None:
     """List CRAB DOC documents connected to this KINGCRAB workspace."""
@@ -74,7 +75,7 @@ def ingest_folder(
     project_id: str = typer.Option("", "--project-id", help="Existing CrabAgent project ID."),
     project_name: str = typer.Option("", "--project-name", help="Create or use a local project name."),
     ontology_purpose: str = typer.Option("", "--purpose", help="Purpose of the ontology pack; a safe default is used when omitted."),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Ask the Expert-gated OpenCrab CrabAgent MCP to build and ingest a folder."""
     result = start_daemon(workspace).request(
@@ -105,7 +106,7 @@ def ingest_folder(
 @pack_app.command("status")
 def pack_status(
     run_id: str = typer.Argument(..., help="Pack ingest run ID returned by `crab pack ingest`."),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Poll the OpenCrab upload session saved with a local pack build plan."""
     try:
@@ -140,7 +141,7 @@ def orchestration_plan(
     child: List[str] = typer.Option([], "--child", help="Child mission in SESSION_ID::OBJECTIVE form; repeatable."),
     max_parallel: int = typer.Option(2, "--max-parallel", min=1, max=8),
     title: str = typer.Option("KINGCRAB orchestration", "--title"),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
     raw_json: bool = typer.Option(False, "--json", help="Print the durable orchestration state as JSON."),
 ) -> None:
     """Create a durable fan-out plan without starting provider work."""
@@ -169,7 +170,7 @@ def orchestration_plan(
 @orchestration_app.command("run")
 def orchestration_run(
     orchestration_id: str = typer.Argument(...),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Start a previously planned orchestration; only real child jobs are counted."""
     result = start_daemon(workspace).request("orchestration.run", orchestration_id=orchestration_id)
@@ -180,7 +181,7 @@ def orchestration_run(
 @orchestration_app.command("status")
 def orchestration_status(
     orchestration_id: str = typer.Argument("", help="Optional orchestration ID."),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
     raw_json: bool = typer.Option(False, "--json"),
 ) -> None:
     """Inspect persisted orchestration state after a fresh process."""
@@ -201,7 +202,7 @@ def orchestration_status(
 @orchestration_app.command("stop")
 def orchestration_stop(
     orchestration_id: str = typer.Argument(...),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Stop the coordinator and interrupt currently running child sessions."""
     result = start_daemon(workspace).request("orchestration.stop", orchestration_id=orchestration_id)
@@ -210,7 +211,7 @@ def orchestration_stop(
 
 @mobile_app.command("pair")
 def mobile_pair(
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Create or read the local phone pairing token without starting a server."""
     pair = ensure_pairing(workspace)
@@ -221,7 +222,7 @@ def mobile_pair(
 
 @mobile_app.command("status")
 def mobile_status(
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Show pairing state and whether the shared crabd runtime is online."""
     pair = ensure_pairing(workspace)
@@ -234,7 +235,7 @@ def mobile_status(
 def mobile_start(
     host: str = typer.Option("127.0.0.1", "--host", help="Use 0.0.0.0 only on a trusted LAN."),
     port: int = typer.Option(8787, "--port", min=0, max=65535),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Run the authenticated mobile panel/API over the existing crabd socket."""
     client = start_daemon(workspace)
@@ -251,7 +252,7 @@ def mobile_start(
 def setup(
     action: str = typer.Argument("status", help="status, codex, local, later, or opencrab"),
     endpoint: str = typer.Argument("", help="OpenCrab MCP URL when action is opencrab."),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Run the local-first setup checks without requiring OpenCrab login."""
     state = onboarding_status(workspace)
@@ -310,14 +311,14 @@ def main(
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
         if sys.stdin.isatty() and sys.stdout.isatty():
-            run_tui(Path.cwd())
+            run_tui(default_workspace())
         else:
-            console.print(build_panel(Path.cwd()))
+            console.print(build_panel(default_workspace()))
 
 
 @app.command("init")
 def initialize(
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Initialize durable CrabAgent state in a workspace."""
     result = RuntimeService(workspace).initialize()
@@ -332,7 +333,7 @@ def run(
     demo: bool = typer.Option(False, "--demo", help="Use the zero-cost deterministic executor."),
     plan_only: bool = typer.Option(False, "--plan-only", help="Persist routes without invoking Codex."),
     max_workers: int = typer.Option(3, min=1, max=8),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Submit a real durable mission; `crab` opens the live command deck."""
     RuntimeService(workspace).initialize()
@@ -385,7 +386,7 @@ def run(
 
 @app.command()
 def status(
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Show persisted mission status and observed daemon state."""
     service = RuntimeService(workspace)
@@ -413,7 +414,7 @@ def status(
 @app.command("retry")
 def retry_mission(
     force: bool = typer.Option(False, "--force", help="Allow retry after an observed workspace change."),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Retry the latest failed/cancelled mission through the durable runtime."""
     client = start_daemon(workspace)
@@ -428,7 +429,7 @@ def retry_mission(
 def ontology_inventory(
     action: str = typer.Argument("show", help="show the live Workspace catalog, diff local cache, or explicitly sync."),
     raw_json: bool = typer.Option(False, "--json", help="Print the returned diff or snapshot as JSON."),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Read the live OpenCrab Workspace catalog; `sync` remains an explicit full audit."""
     action = action.lower()
@@ -506,7 +507,7 @@ def inspect_mission(
     mission_id: Optional[str] = typer.Argument(None),
     latest: bool = typer.Option(False, "--latest"),
     raw_json: bool = typer.Option(False, "--json"),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Inspect the complete persisted state for one mission."""
     store = ColonyStore(workspace)
@@ -526,7 +527,7 @@ def inspect_mission(
 def replay(
     mission_id: Optional[str] = typer.Argument(None),
     latest: bool = typer.Option(False, "--latest"),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Replay the ordered, append-only mission event log."""
     store = ColonyStore(workspace)
@@ -549,7 +550,7 @@ def replay(
 def panel(
     once: bool = typer.Option(False, "--once", help="Render one observed snapshot and exit."),
     interval: float = typer.Option(1.0, min=0.2, max=30.0),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Show the read-only operational command deck."""
     if once:
@@ -638,7 +639,7 @@ def benchmark_run(
     order: str = typer.Option("direct-first", "--order", help="Run order: direct-first or adaptive-first."),
     output_dir: Optional[Path] = typer.Option(None, "--output-dir", resolve_path=True),
     raw_json: bool = typer.Option(False, "--json"),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Run a same-context direct-vs-KINGCRAB benchmark.
 
@@ -691,7 +692,7 @@ def benchmark_suite(
     order: str = typer.Option("adaptive-first", "--order", help="Run order for every case: direct-first or adaptive-first."),
     output_dir: Optional[Path] = typer.Option(None, "--output-dir", resolve_path=True),
     raw_json: bool = typer.Option(False, "--json"),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+    workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
     """Run or explain the explicit KINGCRAB goal matrix."""
     case_ids = [] if cases.strip().lower() in {"", "all"} else [value.strip() for value in cases.split(",") if value.strip()]

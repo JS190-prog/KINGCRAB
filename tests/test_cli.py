@@ -2,6 +2,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from crabagent import __version__
 from crabagent.cli import app
 from crabagent.protocol import start_daemon
 
@@ -12,7 +13,7 @@ runner = CliRunner()
 def test_version_command() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "crab, version 0.7.2" in result.stdout
+    assert f"crab, version {__version__}" in result.stdout
 
 
 def test_init_command(tmp_path: Path) -> None:

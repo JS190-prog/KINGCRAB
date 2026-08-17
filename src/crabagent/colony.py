@@ -934,14 +934,34 @@ class ColonyExecutor:
             snapshot = self.store.inspect(mission_id)
             assignments = {row["task_id"]: row for row in snapshot["assignments"]}
             model_required = any(str(row.get("provider") or "") != "local" for row in assignments.values())
+            session = self.store.session(self.session_id) or {}
+            model_policy = str(session.get("model_policy") or "auto")
+            executor_policy = str(session.get("executor_policy") or "codex")
+            if model_required and model_policy == "host" and executor_policy != "host":
+                self.store.append_event(
+                    mission_id,
+                    "host_model_execution_required",
+                    "RUNTIME",
+                    {
+                        "session_id": self.session_id,
+                        "model_policy": model_policy,
+                        "executor_policy": executor_policy,
+                        "reason": "caller-selected host model requires executor_policy=host; Codex fallback is disabled",
+                    },
+                )
+                raise RuntimeError(
+                    "HOST_MODEL_EXECUTOR_UNAVAILABLE: model_policy=host requires executor_policy=host"
+                )
             if model_required:
                 thread_id = self.bridge.start()
                 self.store.update_session(self.session_id, codex_thread_id=thread_id)
+                bridge_executor = str(getattr(self.bridge, "executor_name", "codex_app_server"))
+                thread_event_prefix = "host_model_thread" if bridge_executor == "host_current_model" else "codex_thread"
                 self.store.append_event(
                     mission_id,
-                    "codex_thread_%s" % self.bridge.last_start_mode,
+                    "%s_%s" % (thread_event_prefix, self.bridge.last_start_mode),
                     "RUNTIME",
-                    {"session_id": self.session_id, "thread_id": thread_id},
+                    {"session_id": self.session_id, "thread_id": thread_id, "executor": bridge_executor},
                 )
             else:
                 self.store.append_event(
@@ -1160,9 +1180,9 @@ class ColonyExecutor:
                         mission_id,
                         {"error": "oracle_gate_rejected"},
                     )
-                self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=self.bridge.thread_id)
+                self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
             elif current["status"] == MissionStatus.CANCELLED.value:
-                self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=self.bridge.thread_id)
+                self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
             self.store.set_budget(
                 Budget(
                     mission_id=mission_id,
@@ -1170,7 +1190,11 @@ class ColonyExecutor:
                     token_limit=self.goal_plan.get("token_budget") or None,
                     tokens_observed=self.observed_tokens,
                     cost_observed=None,
-                    observation_source="codex_app_server" if self.observed_tokens is not None else "not_observed",
+                    observation_source=(
+                        str(getattr(self.bridge, "observation_source", "codex_app_server"))
+                        if self.observed_tokens is not None
+                        else "not_observed"
+                    ),
                 )
             )
             self._persist_kinetic_state(
@@ -1186,7 +1210,7 @@ class ColonyExecutor:
             if reason.startswith("OpenCrab MCP") or reason.startswith("OpenCrab graph gate") or reason.startswith("Oracle ontology gate"):
                 self._record_blocked_oracle_outcome(mission_id, objective, active_task, reason)
             self.store.add_message(self.session_id, "system", "Mission failed: %s" % exc, mission_id, {"error": type(exc).__name__})
-            self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=self.bridge.thread_id)
+            self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
             self._persist_kinetic_state(
                 mission_id,
                 str((active_task or {}).get("task_id") or ""),
@@ -2254,19 +2278,41 @@ class ColonyExecutor:
         context: List[str],
     ) -> CodexLiveTurn:
         role = Role(task["role"])
+        session = self.store.session(self.session_id) or {}
+        executor_name = str(getattr(self.bridge, "executor_name", "codex_app_server"))
+        if str(session.get("model_policy") or "auto") == "host" and executor_name != "host_current_model":
+            self.store.append_event(
+                mission_id,
+                "host_model_execution_required",
+                role.value,
+                {
+                    "task_id": task["task_id"],
+                    "role": role.value,
+                    "executor": executor_name,
+                    "reason": "host model policy requires the host_current_model executor; Codex fallback is disabled",
+                },
+            )
+            raise RuntimeError(
+                "HOST_MODEL_EXECUTOR_UNAVAILABLE: host policy cannot use %s" % executor_name
+            )
         self.store.set_task_status(task["task_id"], TaskStatus.RUNNING, role)
-        attempt = self.store.start_attempt(mission_id, task["task_id"], "codex_app_server")
+        receipt_tool_name = str(getattr(self.bridge, "receipt_tool_name", "codex.app-server.turn"))
+        observation_source = str(getattr(self.bridge, "observation_source", executor_name))
+        supports_session_fallback = bool(getattr(self.bridge, "supports_session_fallback", True))
+        attempt = self.store.start_attempt(mission_id, task["task_id"], executor_name)
         self.store.set_assignment_invocation(task["task_id"], "invoking")
 
         def emit(event: CodexLiveEvent) -> None:
             if event.kind == "runtime_request":
                 request_id = str(event.data.get("request_id") or new_id("request"))
+                method = str(event.data.get("method") or event.text)
+                request_type = "host_model_turn" if method == "hostModel/turn" else "approval_or_input"
                 self.store.add_runtime_request(
                     request_id,
                     self.session_id,
                     mission_id,
-                    "approval_or_input",
-                    str(event.data.get("method") or event.text),
+                    request_type,
+                    method,
                     event.text,
                     event.data,
                 )
@@ -2290,6 +2336,10 @@ class ColonyExecutor:
         model, effort = forced or (str(assignment["model"]), str(assignment["effort"]))
         actual_profile = policy if forced else str(assignment["profile"])
         actual_model = model
+        if executor_name == "host_current_model":
+            model = "current-model"
+            actual_model = "host-current-model"
+            actual_profile = "host"
         try:
             if role is Role.QUEEN and self.goal_plan.get("ontology_required"):
                 self._load_opencrab_context(mission_id, task, attempt["attempt_id"], objective)
@@ -2304,7 +2354,7 @@ class ColonyExecutor:
                     idle_timeout_seconds=ROLE_IDLE_TIMEOUT_SECONDS.get(role, 1800.0),
                 )
             except CodexAppServerError as first_error:
-                if role is Role.ORACLE or not can_fallback_to_session_default(str(first_error)):
+                if role is Role.ORACLE or not supports_session_fallback or not can_fallback_to_session_default(str(first_error)):
                     self.store.append_event(
                         mission_id,
                         "route_fallback_skipped",
@@ -2326,6 +2376,7 @@ class ColonyExecutor:
                 turn.status in {"failed", "timeout"}
                 and actual_model != "codex-session-default"
                 and role is not Role.ORACLE
+                and supports_session_fallback
                 and can_fallback_to_session_default(turn.error)
             ):
                 self.store.append_event(
@@ -2358,7 +2409,10 @@ class ColonyExecutor:
                 self.store.set_assignment_invocation(task["task_id"], "cancelled", model=actual_model)
                 self.store.cancel_active_mission(mission_id, "user_interrupt")
                 return turn
-            content = turn.text or "Codex completed without a textual response. Inspect tool receipts and workspace changes."
+            reported_model = str(getattr(self.bridge, "last_reported_model", "") or "").strip()
+            if reported_model:
+                actual_model = reported_model
+            content = turn.text or "Model turn completed without a textual response. Inspect tool receipts and workspace changes."
             if role is Role.QUEEN and self.goal_plan.get("ontology_required"):
                 content = self._normalize_queen_interpretation(content)
             turn_tokens = _usage_total(turn.usage)
@@ -2387,7 +2441,7 @@ class ColonyExecutor:
                         token_limit=self.goal_plan.get("token_budget") or None,
                         tokens_observed=self.observed_tokens,
                         cost_observed=None,
-                        observation_source="codex_app_server",
+                        observation_source=observation_source,
                     )
                 )
             artifact_content = content + "\n"
@@ -2404,7 +2458,7 @@ class ColonyExecutor:
                 mission_id,
                 task["task_id"],
                 attempt["attempt_id"],
-                "codex.app-server.turn",
+                receipt_tool_name,
                 "success",
                 {
                     "thread_id": turn.thread_id,

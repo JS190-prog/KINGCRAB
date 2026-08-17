@@ -8,7 +8,6 @@ from typing import Any, Dict, List
 
 
 _EXCLUDED_DIRS = {
-    ".crabagent",
     ".git",
     ".hg",
     ".svn",
@@ -24,6 +23,26 @@ _EXCLUDED_DIRS = {
 }
 _MAX_HASH_BYTES = 8 * 1024 * 1024
 _MAX_CHANGED_ROWS = 200
+_RUNTIME_DIR = ".crabagent"
+_RUNTIME_ARTIFACTS_DIR = ".crabagent/artifacts"
+_RUNTIME_MISSION_PREFIX = "mission-"
+
+
+def _visible_directories(root: Path, current: Path, directories: List[str]) -> List[str]:
+    """Keep runtime state hidden while observing explicitly writable artifacts."""
+    try:
+        relative_current = current.relative_to(root).as_posix()
+    except ValueError:
+        return []
+    if relative_current == _RUNTIME_DIR:
+        return [name for name in sorted(directories) if name == "artifacts"]
+    if relative_current == _RUNTIME_ARTIFACTS_DIR:
+        return [
+            name
+            for name in sorted(directories)
+            if not name.startswith(_RUNTIME_MISSION_PREFIX) and name not in _EXCLUDED_DIRS
+        ]
+    return [name for name in sorted(directories) if name not in _EXCLUDED_DIRS]
 
 
 def _file_fingerprint(path: Path) -> str:
@@ -51,12 +70,15 @@ def capture_workspace(root: Path) -> Dict[str, Any]:
     files: Dict[str, str] = {}
     if root.exists():
         for current, directories, filenames in os.walk(root, followlinks=False):
-            directories[:] = sorted(name for name in directories if name not in _EXCLUDED_DIRS)
+            current_path = Path(current)
+            directories[:] = _visible_directories(root, current_path, directories)
             for name in sorted(filenames):
-                path = Path(current) / name
+                path = current_path / name
                 try:
                     relative = path.relative_to(root).as_posix()
                 except ValueError:
+                    continue
+                if relative.startswith(_RUNTIME_DIR + "/") and not relative.startswith(_RUNTIME_ARTIFACTS_DIR + "/"):
                     continue
                 if path.is_symlink():
                     try:

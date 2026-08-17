@@ -94,6 +94,25 @@ NEGATED_WRITE_PHRASES = (
     "개발하지",
 )
 
+# These words describe an observed change, not an instruction to make one.
+# Remove only the bounded read/list forms so imperative requests such as
+# "update the config" and "파일을 수정해" remain write intent.
+NEGATED_SCOPE_CONTEXTS = (
+    # English negative-scope clauses must not activate knowledge/external routing.
+    r"\b(?:do not|don't|must not)\b[^.!?;\n]*\b(?:opencrab|ontology|knowledge graph|rag|evidence|mcp|web|internet|external|browser|crawl|research|search)\b[^.!?;\n]*",
+    r"\bwithout\b[^.!?;\n]*\b(?:opencrab|ontology|knowledge graph|rag|evidence|mcp|web|internet|external|browser|crawl|research|search)\b[^.!?;\n]*",
+    # Korean equivalents, including phrases such as '오픈크랩을 사용하지 말고'.
+    r"(?:오픈크랩|온톨로지|지식\s*그래프|근거|팩|웹|인터넷|외부\s*서비스|브라우저|검색|조사)[^.!?;\n]{0,60}(?:사용하지|접근하지|조회하지|검색하지|조사하지|쓰지|말고|않고|없이|금지)[^.!?;\n]*",
+)
+
+READ_ONLY_CHANGE_CONTEXTS = (
+    r"\b(?:change|update|modification|revision|edit(?:ed)?)\s+(?:history|logs?|records?|list)\b",
+    r"\b(?:added|deleted|modified|updated|changed)\s+(?:files?|items?|records?|entries?|documents?)\b",
+    r"\b(?:show|list|view|read|check|inspect|review|display)\b(?:\s+(?:the|all|recent|current))?\s+(?:changes?|updates?|modifications?|revisions?|edits?|additions?|deletions?)(?:\s+(?:history|logs?|records?|list))?\b",
+    r"(?:변경|수정|추가|삭제|업데이트)(?:된|한)?\s*(?:내역|이력|기록|목록|사항|내용|파일|항목|문서)",
+    r"(?:파일|항목|문서|프로젝트|팩)\s*(?:변경|수정|추가|삭제|업데이트)\s*(?:내역|이력|기록|목록|사항)",
+)
+
 RESEARCH_SIGNALS = (
     "research",
     "search",
@@ -278,10 +297,19 @@ def _contains_graph_signal(text: str) -> bool:
             return True
     return False
 
+def _scope_signal_text(text: str) -> str:
+    scrubbed = text
+    for pattern in NEGATED_SCOPE_CONTEXTS:
+        scrubbed = re.sub(pattern, " ", scrubbed, flags=re.IGNORECASE)
+    return scrubbed
+
+
 def _contains_write_intent(text: str) -> bool:
     scrubbed = text
     for phrase in NEGATED_WRITE_PHRASES:
         scrubbed = scrubbed.replace(phrase, "")
+    for pattern in READ_ONLY_CHANGE_CONTEXTS:
+        scrubbed = re.sub(pattern, " ", scrubbed, flags=re.IGNORECASE)
     return _contains(scrubbed, WRITE_SIGNALS)
 
 
@@ -338,6 +366,7 @@ def classify_goal(
     """
     clean = " ".join(str(objective or "").split())
     text = clean.lower()
+    signal_text = _scope_signal_text(text)
     selected_context = max(0, int(selected_pack_count)) > 0 or max(0, int(selected_project_count)) > 0
     # Selection is available context, not an instruction to invoke QUEEN. A
     # user may keep packs selected while having a casual conversation. But an
@@ -347,34 +376,34 @@ def classify_goal(
     # Explicit ``chat`` mode still bypasses this compiler at the interaction
     # layer, so users retain a deliberate escape hatch.
     selected_context_ontology = selected_context and (
-        _contains(text, ONTOLOGY_SIGNALS)
-        or _contains(text, RESEARCH_SIGNALS)
-        or _contains(text, DIRECT_LOOKUP_SIGNALS)
-        or _contains(text, SEMANTIC_SYNTHESIS_SIGNALS)
+        _contains(signal_text, ONTOLOGY_SIGNALS)
+        or _contains(signal_text, RESEARCH_SIGNALS)
+        or _contains(signal_text, DIRECT_LOOKUP_SIGNALS)
+        or _contains(signal_text, SEMANTIC_SYNTHESIS_SIGNALS)
         # Planning/design language can imply a knowledge dependency, but a
         # plain create/edit/build request must stay on the cheap code route.
-        or (_contains(text, ACTION_SIGNALS) and not _contains_write_intent(text))
+        or (_contains(signal_text, ACTION_SIGNALS) and not _contains_write_intent(text))
     )
     # When OpenCrab is connected, knowledge-shaped goals should use it even
     # without a manually selected pack. Pure code edits stay direct unless the
     # user selected an explicit knowledge scope. This is the main distinction
     # between a connected KINGCRAB workspace and a generic coding chat.
     ambient_knowledge = bool(knowledge_available) and (
-        _contains(text, RESEARCH_SIGNALS)
-        or _contains(text, DIRECT_LOOKUP_SIGNALS)
-        or _contains(text, SEMANTIC_SYNTHESIS_SIGNALS)
+        _contains(signal_text, RESEARCH_SIGNALS)
+        or _contains(signal_text, DIRECT_LOOKUP_SIGNALS)
+        or _contains(signal_text, SEMANTIC_SYNTHESIS_SIGNALS)
     )
     contextual_ontology = selected_context_ontology or ambient_knowledge
-    ontology = _contains(text, ONTOLOGY_SIGNALS) or contextual_ontology
+    ontology = _contains(signal_text, ONTOLOGY_SIGNALS) or contextual_ontology
     writes = _contains_write_intent(text)
-    research = _contains(text, RESEARCH_SIGNALS)
-    external = _contains(text, EXTERNAL_SIGNALS)
-    high_risk = _contains(text, HIGH_RISK_SIGNALS) or len(clean) > 320
+    research = _contains(signal_text, RESEARCH_SIGNALS)
+    external = _contains(signal_text, EXTERNAL_SIGNALS)
+    high_risk = _contains(signal_text, HIGH_RISK_SIGNALS) or len(clean) > 320
     strategic = high_risk or (
         ontology
-        and (len(clean) > 180 or _contains(text, KING_STRATEGY_SIGNALS))
+        and (len(clean) > 180 or _contains(signal_text, KING_STRATEGY_SIGNALS))
     )
-    graph_required = ontology and _contains_graph_signal(text)
+    graph_required = ontology and _contains_graph_signal(signal_text)
 
     if forced in {"chat", "colony"}:
         forced_colony = forced == "colony"
@@ -393,8 +422,8 @@ def classify_goal(
     complexity = "strategic" if strategic else "bounded" if (writes or research or ontology) else "trivial"
     requires_verification = writes or ontology or research or high_risk
     requires_model_planning = strategic
-    direct_lookup = ontology and not writes and not external and not strategic and _contains(text, DIRECT_LOOKUP_SIGNALS)
-    semantic_synthesis = ontology and _contains(text, SEMANTIC_SYNTHESIS_SIGNALS)
+    direct_lookup = ontology and not writes and not external and not strategic and _contains(signal_text, DIRECT_LOOKUP_SIGNALS)
+    semantic_synthesis = ontology and _contains(signal_text, SEMANTIC_SYNTHESIS_SIGNALS)
     # A bounded evidence question can be answered by the local QUEEN from the
     # observed MCP receipt. It still creates the evidence ledger, Soldier
     # handoff, and Oracle gate; it simply does not ask a model to paraphrase
@@ -448,7 +477,7 @@ def classify_goal(
         action_mode = "execute"
     elif external or research:
         action_mode = "research"
-    elif ontology and _contains(text, ACTION_SIGNALS):
+    elif ontology and _contains(signal_text, ACTION_SIGNALS):
         action_mode = "plan"
     elif ontology:
         action_mode = "explain"
@@ -540,9 +569,9 @@ def classify_goal(
     rationale: List[str] = []
     if ontology:
         rationale.append("goal explicitly requires an evidence-to-claim ontology path")
-        if selected_context_ontology and not _contains(text, ONTOLOGY_SIGNALS):
+        if selected_context_ontology and not _contains(signal_text, ONTOLOGY_SIGNALS):
             rationale.append("selected OpenCrab pack/project context is an active dependency for this actionable goal")
-        if ambient_knowledge and not _contains(text, ONTOLOGY_SIGNALS):
+        if ambient_knowledge and not _contains(signal_text, ONTOLOGY_SIGNALS):
             rationale.append("connected OpenCrab workspace is the default knowledge source for this goal")
     elif selected_pack_count or selected_project_count:
         rationale.append("selected pack/project context is retained without forcing an ontology mission")

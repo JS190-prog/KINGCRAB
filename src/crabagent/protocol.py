@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
+import socketserver
 import subprocess
 import sys
 import time
@@ -10,12 +11,23 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-def runtime_paths(workspace: Path) -> Dict[str, Path]:
+USE_UNIX_SOCKET = hasattr(socket, "AF_UNIX") and hasattr(socketserver, "UnixStreamServer")
+
+
+def runtime_port(workspace: Path) -> int:
+    digest = hashlib.sha256(str(workspace.resolve()).encode("utf-8")).hexdigest()[:8]
+    return 45000 + (int(digest, 16) % 10000)
+
+
+def runtime_paths(workspace: Path) -> Dict[str, Any]:
     root = workspace.resolve() / ".crabagent"
     digest = hashlib.sha256(str(workspace.resolve()).encode("utf-8")).hexdigest()[:12]
     return {
         "root": root,
         "socket": Path("/tmp/crabagent-%s.sock" % digest),
+        "transport": "unix" if USE_UNIX_SOCKET else "tcp",
+        "port": runtime_port(workspace),
+        "endpoint": root / "crabd.endpoint.json",
         "pid": root / "crabd.pid",
         "log": root / "crabd.log",
     }
@@ -52,7 +64,20 @@ class DaemonClient:
 
     def request(self, action: str, **payload: Any) -> Dict[str, Any]:
         message = {"action": action, "payload": payload}
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        transport = self.paths["transport"]
+        if transport == "unix":
+            family = socket.AF_UNIX
+            address: Any = str(self.paths["socket"])
+        else:
+            family = socket.AF_INET
+            address = ("127.0.0.1", int(self.paths["port"]))
+            try:
+                endpoint = json.loads(self.paths["endpoint"].read_text(encoding="utf-8"))
+                if endpoint.get("transport") == "tcp" and 1 <= int(endpoint.get("port")) <= 65535:
+                    address = ("127.0.0.1", int(endpoint["port"]))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                pass
+        with socket.socket(family, socket.SOCK_STREAM) as client:
             # Read-only OpenCrab inventory calls can legitimately take longer than
             # a local state request; the TUI invokes them on a background thread.
             if action in {"ontology.refresh", "ontology.sync", "ontology.catalog", "pack.ingest"}:
@@ -62,7 +87,7 @@ class DaemonClient:
             else:
                 request_timeout = self.timeout
             client.settimeout(request_timeout)
-            client.connect(str(self.paths["socket"]))
+            client.connect(address)
             client.sendall((json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8"))
             chunks = bytearray()
             while True:

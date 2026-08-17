@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     active_mission_id TEXT,
     model_policy TEXT NOT NULL DEFAULT 'auto',
     interaction_mode TEXT NOT NULL DEFAULT 'auto',
+    executor_policy TEXT NOT NULL DEFAULT 'codex',
     mcp_policy TEXT NOT NULL DEFAULT 'auto',
     cli_policy TEXT NOT NULL DEFAULT 'auto',
     max_workers INTEGER NOT NULL DEFAULT 3,
@@ -338,6 +339,9 @@ class ColonyStore:
                 connection.execute("ALTER TABLE sessions ADD COLUMN model_policy TEXT NOT NULL DEFAULT 'auto'")
             if "interaction_mode" not in session_columns:
                 connection.execute("ALTER TABLE sessions ADD COLUMN interaction_mode TEXT NOT NULL DEFAULT 'auto'")
+            if "executor_policy" not in session_columns:
+                connection.execute("ALTER TABLE sessions ADD COLUMN executor_policy TEXT NOT NULL DEFAULT 'codex'")
+            connection.execute("UPDATE sessions SET executor_policy = 'codex' WHERE executor_policy IS NULL OR executor_policy = ''")
             if "cli_policy" not in session_columns:
                 connection.execute("ALTER TABLE sessions ADD COLUMN cli_policy TEXT NOT NULL DEFAULT 'auto'")
             if "project_id" not in session_columns:
@@ -435,6 +439,7 @@ class ColonyStore:
         title: str = "CrabAgent session",
         model_policy: str = "auto",
         interaction_mode: str = "auto",
+        executor_policy: str = "codex",
         mcp_policy: str = "auto",
         cli_policy: str = "auto",
         max_workers: int = 3,
@@ -449,8 +454,8 @@ class ColonyStore:
         policy = worker_policy if worker_policy in {item.value for item in WorkerPolicy} else WorkerPolicy.AUTO.value
         with self.connection() as connection:
             connection.execute(
-                "INSERT INTO sessions(session_id, title, status, model_policy, interaction_mode, mcp_policy, cli_policy, max_workers, worker_policy, project_id, project_name, project_root_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (session_id, title, "ready", model_policy, interaction_mode, mcp_policy, cli_policy, max(1, min(max_workers, 8)), policy, project_id, project_name, project_root_path, now, now),
+                "INSERT INTO sessions(session_id, title, status, model_policy, interaction_mode, executor_policy, mcp_policy, cli_policy, max_workers, worker_policy, project_id, project_name, project_root_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, title, "ready", model_policy, interaction_mode, executor_policy, mcp_policy, cli_policy, max(1, min(max_workers, 8)), policy, project_id, project_name, project_root_path, now, now),
             )
             self.append_event(None, "session_created", "SYSTEM", {"session_id": session_id, "title": title}, connection)
         return self.session(session_id) or {}
@@ -474,10 +479,10 @@ class ColonyStore:
                 """
                 INSERT INTO sessions(
                     session_id, title, status, codex_thread_id, active_mission_id,
-                    model_policy, interaction_mode, mcp_policy, cli_policy, max_workers,
+                    model_policy, interaction_mode, executor_policy, mcp_policy, cli_policy, max_workers,
                     worker_policy, project_id, project_name, project_root_path,
                     ontology_context_count, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -487,6 +492,7 @@ class ColonyStore:
                     None,
                     source["model_policy"],
                     source["interaction_mode"],
+                    source.get("executor_policy") or "codex",
                     source["mcp_policy"],
                     source.get("cli_policy") or "auto",
                     source["max_workers"],
@@ -744,7 +750,7 @@ class ColonyStore:
     def update_session(self, session_id: str, **changes: Any) -> Dict[str, Any]:
         allowed = {
             "title", "status", "codex_thread_id", "active_mission_id", "model_policy",
-            "interaction_mode", "mcp_policy", "cli_policy", "max_workers", "project_id", "project_name",
+            "interaction_mode", "executor_policy", "mcp_policy", "cli_policy", "max_workers", "project_id", "project_name",
             "project_root_path", "ontology_context_count", "worker_policy",
         }
         clean = {key: value for key, value in changes.items() if key in allowed}
