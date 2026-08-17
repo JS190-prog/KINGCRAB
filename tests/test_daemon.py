@@ -191,7 +191,7 @@ def test_zero_model_mission_uses_preloaded_opencrab_context_without_runtime_endp
     paths = runtime_paths(tmp_path)
     paths["root"].mkdir(parents=True, exist_ok=True)
     server = RuntimeServer(tmp_path, paths["socket"])
-    monkeypatch.setattr(server, "_bridge", lambda session: object())
+    monkeypatch.setattr(server, "_bridge", lambda session: type("BridgeStub", (), {"thread_id": None})())
     try:
         session = server.dispatch({"action": "session.ensure", "payload": {}})
         server.dispatch({
