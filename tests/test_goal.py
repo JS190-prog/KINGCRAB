@@ -207,6 +207,29 @@ def test_ontology_backed_write_keeps_queen_and_worker_in_the_same_goal_contract(
     assert plan.response_contract == ["selected_path", "bounded_change", "verification", "next_action"]
 
 
+def test_negated_write_signal_does_not_create_workspace_change() -> None:
+    plan = classify_goal(
+        "오픈크랩 근거로 D01 상태만 확인하고 어떤 파일이나 OpenCrab 데이터도 변경하지 마."
+    )
+    assert plan.ontology_required is True
+    assert plan.requires_write is False
+    assert "WORKER" not in plan.stages
+    assert plan.action_mode in {"lookup", "explain", "research"}
+
+
+def test_positive_write_survives_negative_scope_constraint() -> None:
+    plan = classify_goal(
+        "오픈크랩 근거로 result.txt를 만들어. 다른 파일은 수정하지 마."
+    )
+    assert plan.requires_write is True
+    assert "WORKER" in plan.stages
+
+
+def test_english_do_not_create_is_not_write_intent() -> None:
+    plan = classify_goal("Check OpenCrab evidence and do not create files.")
+    assert plan.requires_write is False
+
+
 def test_ontology_requests_leave_direct_chat_in_auto_mode() -> None:
     assert interaction_kind("오픈크랩 팩을 찾아서 근거를 비교해줘") == "colony"
     assert interaction_kind("안녕, 오늘 뭐해?") == "chat"

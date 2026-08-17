@@ -50,6 +50,49 @@ WRITE_SIGNALS = (
     "개발",
 )
 
+NEGATED_WRITE_PHRASES = (
+    "do not build",
+    "do not create",
+    "do not fix",
+    "do not implement",
+    "do not install",
+    "do not deploy",
+    "do not edit",
+    "do not add",
+    "do not remove",
+    "do not update",
+    "do not refactor",
+    "do not write",
+    "don't build",
+    "don't create",
+    "don't fix",
+    "don't implement",
+    "don't install",
+    "don't deploy",
+    "don't edit",
+    "don't add",
+    "don't remove",
+    "don't update",
+    "don't refactor",
+    "don't write",
+    "without changing",
+    "without modifying",
+    "without editing",
+    "without writing",
+    "without creating",
+    "만들지",
+    "고치지",
+    "수정하지",
+    "구현하지",
+    "설치하지",
+    "배포하지",
+    "추가하지",
+    "삭제하지",
+    "변경하지",
+    "작성하지",
+    "개발하지",
+)
+
 RESEARCH_SIGNALS = (
     "research",
     "search",
@@ -224,6 +267,13 @@ def _contains(text: str, signals: tuple[str, ...]) -> bool:
     return any(signal in text for signal in signals)
 
 
+def _contains_write_intent(text: str) -> bool:
+    scrubbed = text
+    for phrase in NEGATED_WRITE_PHRASES:
+        scrubbed = scrubbed.replace(phrase, "")
+    return _contains(scrubbed, WRITE_SIGNALS)
+
+
 @dataclass(frozen=True)
 class GoalPlan:
     """A deterministic mission contract compiled before any model turn."""
@@ -292,7 +342,7 @@ def classify_goal(
         or _contains(text, SEMANTIC_SYNTHESIS_SIGNALS)
         # Planning/design language can imply a knowledge dependency, but a
         # plain create/edit/build request must stay on the cheap code route.
-        or (_contains(text, ACTION_SIGNALS) and not _contains(text, WRITE_SIGNALS))
+        or (_contains(text, ACTION_SIGNALS) and not _contains_write_intent(text))
     )
     # When OpenCrab is connected, knowledge-shaped goals should use it even
     # without a manually selected pack. Pure code edits stay direct unless the
@@ -305,7 +355,7 @@ def classify_goal(
     )
     contextual_ontology = selected_context_ontology or ambient_knowledge
     ontology = _contains(text, ONTOLOGY_SIGNALS) or contextual_ontology
-    writes = _contains(text, WRITE_SIGNALS)
+    writes = _contains_write_intent(text)
     research = _contains(text, RESEARCH_SIGNALS)
     external = _contains(text, EXTERNAL_SIGNALS)
     high_risk = _contains(text, HIGH_RISK_SIGNALS) or len(clean) > 320
