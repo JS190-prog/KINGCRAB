@@ -14,3 +14,9 @@ def test_korean_request_words_are_not_sent_as_ontology_terms() -> None:
     assert "브랜드" in terms
     assert "전략" in terms
     assert "근거" in terms
+
+
+def test_explicit_mentions_relation_is_preserved_for_graph_route() -> None:
+    route = compile_ontology_route("show the mentions relation path", graph_required=True)
+    assert route["relation_bias"] == ["mentions"]
+    assert route["explicit_relations"] == ["mentions"]

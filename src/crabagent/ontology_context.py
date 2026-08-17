@@ -21,7 +21,7 @@ _CACHE_MAX_ENTRIES = 64
 # silently dropping the tail of a user's selection.
 _MCP_PACK_BATCH_LIMIT = 25
 _MAX_EXPLICIT_PACKAGES = 500
-_CACHE_REVISION = "explicit-selection-batches-v1"
+_CACHE_REVISION = "gateway-graph-handoff-v2"
 
 
 def _list_value(payload: Any, *keys: str) -> List[Dict[str, Any]]:
@@ -582,7 +582,28 @@ class OntologyContextCollector:
         edges: List[Dict[str, Any]] = []
         list_nodes_widened = False
 
-        if graph_required and query_status in {"ok", "no_evidence"}:
+        gateway_graph = query_payload.get("gateway_graph") if isinstance(query_payload.get("gateway_graph"), dict) else {}
+        gateway_graph_authoritative = (
+            bool(gateway_graph)
+            and str(gateway_graph.get("authority") or "") == "gateway_verified_mcp_response"
+            and _payload_status(gateway_graph) in {"ok", "no_evidence", "cached"}
+        )
+
+        if graph_required and query_status in {"ok", "no_evidence"} and gateway_graph_authoritative:
+            nodes = _normalize_nodes(_node_rows(gateway_graph), limit=12)
+            edges = _normalize_edges(_list_value(gateway_graph, "edges", "items", "relations"), limit=24)
+            for raw_call in gateway_graph.get("tool_calls") or []:
+                if not isinstance(raw_call, dict):
+                    continue
+                calls.append({
+                    "tool": str(raw_call.get("tool") or "gateway_graph_prefetch"),
+                    "arguments": raw_call.get("arguments") if isinstance(raw_call.get("arguments"), dict) else {},
+                    "status": "observed",
+                    "response_status": str(raw_call.get("response_status") or raw_call.get("status") or "ok").lower(),
+                    "source": "gateway_verified_mcp_response",
+                })
+            list_nodes_widened = True
+        elif graph_required and query_status in {"ok", "no_evidence"}:
             node_arguments: Dict[str, Any] = {
                 "query": objective,
                 "limit": int(route.get("node_limit") or 6),
@@ -673,7 +694,7 @@ class OntologyContextCollector:
         # route's bounded context budget resolving one or two endpoints. This
         # is a cheap MCP lookup and prevents UUID-only topology from looking
         # like a semantically usable path.
-        if graph_required and edges:
+        if graph_required and edges and not gateway_graph_authoritative:
             known_node_ids = {str(row.get("id") or "") for row in nodes if row.get("id")}
             endpoint_ids: List[str] = []
             ranked_edges = sorted(
@@ -797,7 +818,7 @@ class OntologyContextCollector:
         receipt = {
             "schema": "crab.opencrab-context-receipt/v2",
             "source": "OpenCrab MCP",
-            "authority": "direct_mcp_response",
+            "authority": str(query_payload.get("authority") or "direct_mcp_response"),
             "query": objective,
             "arguments": query_arguments,
             "status": query_status,

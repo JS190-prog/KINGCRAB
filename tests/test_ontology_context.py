@@ -558,3 +558,54 @@ def test_workspace_auto_resolved_scope_is_recorded_and_used_for_query() -> None:
     assert "pack_query" not in query
     assert receipt["pack_scope"]["scope_mode"] == "workspace_auto_resolved"
     assert receipt["pack_scope"]["scope_resolution"]["selected_titles"] == ["사업 전략"]
+
+
+def test_gateway_preloaded_graph_avoids_runtime_graph_endpoint() -> None:
+    calls: List[str] = []
+
+    def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        calls.append(name)
+        assert name == "opencrab_query"
+        return {
+            "status": "ok",
+            "authority": "gateway_verified_mcp_response",
+            "evidence": [{"id": "ev-1", "text": "Grounded graph evidence", "source": "Evidence Document"}],
+            "gateway_graph": {
+                "status": "ok",
+                "authority": "gateway_verified_mcp_response",
+                "nodes": [
+                    {"id": "doc-1", "label": "Evidence Document", "node_type": "document"},
+                    {"id": "concept-1", "label": "Verified concept", "node_type": "concept"},
+                ],
+                "edges": [{"id": "edge-1", "from_id": "doc-1", "to_id": "concept-1", "relation": "mentions", "evidence_refs": ["ev-1"]}],
+                "tool_calls": [
+                    {"tool": "opencrab_search_nodes", "arguments": {"package_ids": ["pack-1"]}, "response_status": "ok"},
+                    {"tool": "opencrab_get_node_context", "arguments": {"node_id": "concept-1"}, "response_status": "ok"},
+                ],
+            },
+        }
+
+    receipt = OntologyContextCollector(call_tool).collect(
+        "show the mentions graph path",
+        package_ids=["pack-1"],
+        graph_required=True,
+        retrieval_contract={
+            "primary_query": "show the mentions graph path",
+            "evidence_top_k": 8,
+            "node_limit": 6,
+            "node_scan_limit": 1000,
+            "context_node_limit": 1,
+            "edge_limit": 24,
+            "relation_bias": ["mentions"],
+            "scope_mode": "selected",
+            "package_limit": 8,
+        },
+    )
+
+    assert calls == ["opencrab_query"]
+    assert receipt["authority"] == "gateway_verified_mcp_response"
+    assert receipt["graph_gate"] == "pass"
+    assert receipt["quality"]["graph_semantic_gate"] == "pass"
+    assert receipt["paths"][0]["relation"] == "mentions"
+    assert receipt["paths"][0]["evidence_refs"] == ["ev-1"]
+    assert [row["tool"] for row in receipt["tool_calls"][1:]] == ["opencrab_search_nodes", "opencrab_get_node_context"]

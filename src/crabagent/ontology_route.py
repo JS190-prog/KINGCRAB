@@ -34,6 +34,7 @@ _RELATION_SIGNALS = {
     "contradicts": ("conflict", "contradict", "충돌", "반대", "모순"),
     "depends_on": ("depend", "의존", "조건", "필요"),
     "leads_to": ("lead", "결과", "이어", "연결", "경로"),
+    "mentions": ("mention", "mentions", "언급"),
 }
 
 
