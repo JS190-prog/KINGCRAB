@@ -12,7 +12,7 @@ runner = CliRunner()
 def test_version_command() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "crab, version 0.7.1" in result.stdout
+    assert "crab, version 0.7.2" in result.stdout
 
 
 def test_init_command(tmp_path: Path) -> None:

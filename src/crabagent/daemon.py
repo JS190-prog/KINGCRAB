@@ -352,7 +352,32 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             if refreshed:
                 self._dispatch(refreshed, str(next_input["content"]))
 
-    def _launch_colony(self, session: Dict[str, Any], objective: str, *, retry_of: str = "") -> Dict[str, Any]:
+    @staticmethod
+    def _bounded_preloaded_opencrab_context(value: Any) -> Optional[Dict[str, Any]]:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("opencrab_context must be an object")
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > 64 * 1024:
+            raise ValueError("opencrab_context exceeds the local handoff limit")
+        normalized = json.loads(encoded.decode("utf-8"))
+        status = str(normalized.get("status") or "").lower()
+        if status not in {"ok", "no_evidence", "cached"}:
+            raise ValueError("opencrab_context must contain an observed successful status")
+        evidence = normalized.get("evidence")
+        if evidence is not None and (not isinstance(evidence, list) or len(evidence) > 32):
+            raise ValueError("opencrab_context evidence exceeds the bounded handoff limit")
+        return normalized
+
+    def _launch_colony(
+        self,
+        session: Dict[str, Any],
+        objective: str,
+        *,
+        retry_of: str = "",
+        preloaded_opencrab_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         session_id = str(session["session_id"])
         self.service.store.update_session(session_id, title=_king_title(objective))
         with self._state_lock:
@@ -362,13 +387,25 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             cancel = threading.Event()
             self._cancels[session_id] = cancel
 
+            frozen_opencrab_context = (
+                json.dumps(preloaded_opencrab_context, ensure_ascii=False, separators=(",", ":"))
+                if preloaded_opencrab_context is not None
+                else ""
+            )
+
             def target() -> None:
                 try:
+                    loader = (
+                        (lambda _arguments: json.loads(frozen_opencrab_context))
+                        if frozen_opencrab_context
+                        else None
+                    )
                     executor = ColonyExecutor(
                         self.service,
                         session_id,
                         self._bridge(session),
                         cancel,
+                        opencrab_context_loader=loader,
                         retry_of=retry_of,
                     )
                     executor.run(
@@ -715,7 +752,15 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             job.start()
         return {"session_id": session_id, "status": "starting", "interaction": "chat", "prompt": prompt}
 
-    def _dispatch(self, session: Dict[str, Any], prompt: str, explicit: str = "", *, direct_opencrab: bool = False) -> Dict[str, Any]:
+    def _dispatch(
+        self,
+        session: Dict[str, Any],
+        prompt: str,
+        explicit: str = "",
+        *,
+        direct_opencrab: bool = False,
+        preloaded_opencrab_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         continuation = self._dispatch_continuation(session, prompt)
         if continuation is not None:
             return continuation
@@ -728,7 +773,15 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             selected_project_count=len(context.get("project_ids") or []),
             knowledge_available=self._knowledge_available(session),
         )
-        return self._launch_chat(session, prompt, direct_opencrab=direct_opencrab) if kind == "chat" else self._launch_colony(session, prompt)
+        return (
+            self._launch_chat(session, prompt, direct_opencrab=direct_opencrab)
+            if kind == "chat"
+            else self._launch_colony(
+                session,
+                prompt,
+                preloaded_opencrab_context=preloaded_opencrab_context,
+            )
+        )
 
     def _interrupt(self, session_id: str) -> Dict[str, Any]:
         with self._state_lock:
@@ -1364,6 +1417,9 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             session_id = str(session["session_id"])
             with self._state_lock:
                 running = bool(self._jobs.get(session_id) and self._jobs[session_id].is_alive())
+            preloaded_opencrab_context = self._bounded_preloaded_opencrab_context(payload.get("opencrab_context"))
+            if running and preloaded_opencrab_context is not None:
+                raise RuntimeError("preloaded OpenCrab context cannot be queued onto a running mission")
             if running:
                 if disposition not in {"now", "wait"}:
                     raise RuntimeError("mission is running; choose disposition now or wait")
@@ -1376,6 +1432,7 @@ class RuntimeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
                 objective,
                 str(payload.get("interaction") or ""),
                 direct_opencrab=bool(payload.get("benchmark_direct")),
+                preloaded_opencrab_context=preloaded_opencrab_context,
             )
         if action == "mission.retry":
             session = self._session(str(payload.get("session_id") or ""))

@@ -187,6 +187,72 @@ def test_short_follow_up_without_history_does_not_create_context_free_mission(tm
             paths["socket"].unlink()
 
 
+def test_zero_model_mission_uses_preloaded_opencrab_context_without_runtime_endpoint(tmp_path: Path, monkeypatch) -> None:
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    server = RuntimeServer(tmp_path, paths["socket"])
+    monkeypatch.setattr(server, "_bridge", lambda session: object())
+    try:
+        session = server.dispatch({"action": "session.ensure", "payload": {}})
+        server.dispatch({
+            "action": "ontology.context",
+            "payload": {
+                "session_id": session["session_id"],
+                "project_ids": ["project-1"],
+                "package_ids": ["pack-1"],
+                "project_labels": {},
+                "package_labels": {},
+            },
+        })
+        context = {
+            "status": "ok",
+            "authority": "gateway_verified_mcp_response",
+            "evidence": [
+                {"id": "ev-1", "text": "TB2 pack state observed", "source": "opencrab://pack-1"}
+            ],
+            "evidence_count": 1,
+            "claim_gate": "pass",
+            "graph_gate": "not_required",
+            "quality": {"evidence_count": 1, "usable_evidence_count": 1},
+            "tool_calls": [],
+        }
+        submitted = server.dispatch({
+            "action": "prompt.submit",
+            "payload": {
+                "session_id": session["session_id"],
+                "objective": "팩 목록과 상태를 보여줘",
+                "disposition": "start",
+                "interaction": "colony",
+                "opencrab_context": context,
+            },
+        })
+        assert submitted["status"] == "starting"
+        deadline = time.monotonic() + 3.0
+        mission = None
+        while time.monotonic() < deadline:
+            rows = server.service.store.list_missions(limit=20)
+            if rows:
+                mission = rows[0]
+                if str(mission.get("status") or "") in {"completed", "failed", "cancelled"}:
+                    break
+            time.sleep(0.02)
+        assert mission is not None
+        assert mission["status"] == "completed"
+        detail = server.service.store.inspect(str(mission["mission_id"]))
+        assert all(str(row.get("provider") or "") == "local" for row in detail["assignments"])
+        receipts = [
+            row for row in detail["tool_receipts"]
+            if str(row.get("tool_name") or "") == "opencrab.mcp.opencrab_query"
+        ]
+        assert receipts
+        assert all(str(row.get("status") or "") == "success" for row in receipts)
+        assert any(str(row.get("kind") or "") == "ontology_ledger" for row in detail["artifacts"])
+    finally:
+        server.server_close()
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
 def test_auto_started_daemon_survives_client_process_scope(tmp_path: Path) -> None:
     client = start_daemon(tmp_path)
     try:

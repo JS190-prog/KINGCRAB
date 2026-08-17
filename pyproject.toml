@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "crabagent-cli"
-version = "0.7.1"
+version = "0.7.2"
 description = "Ontology-first, durable agent colony runtime and CLI panel."
 readme = "README.md"
 requires-python = ">=3.9"
