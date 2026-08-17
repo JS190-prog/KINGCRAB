@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import re
 from typing import Any, Dict, List, Optional
 
 from .ontology_route import compile_ontology_route
@@ -267,6 +268,16 @@ def _contains(text: str, signals: tuple[str, ...]) -> bool:
     return any(signal in text for signal in signals)
 
 
+def _contains_graph_signal(text: str) -> bool:
+    for signal in GRAPH_SIGNALS:
+        if signal.isascii():
+            pattern = rf"(?<![A-Za-z0-9_]){re.escape(signal)}(?![A-Za-z0-9_])"
+            if re.search(pattern, text):
+                return True
+        elif signal in text:
+            return True
+    return False
+
 def _contains_write_intent(text: str) -> bool:
     scrubbed = text
     for phrase in NEGATED_WRITE_PHRASES:
@@ -363,7 +374,7 @@ def classify_goal(
         ontology
         and (len(clean) > 180 or _contains(text, KING_STRATEGY_SIGNALS))
     )
-    graph_required = ontology and _contains(text, GRAPH_SIGNALS)
+    graph_required = ontology and _contains_graph_signal(text)
 
     if forced in {"chat", "colony"}:
         forced_colony = forced == "colony"

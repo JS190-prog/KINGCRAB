@@ -382,6 +382,23 @@ def test_benchmark_suite_summary_does_not_claim_universal_superiority() -> None:
     assert "universal claim" in result["limitations"][-1]
 
 
+def test_ledger_lookup_does_not_trigger_edge_graph_signal() -> None:
+    plan = classify_goal(
+        "Use OpenCrab evidence to verify E4 Promotion Decision Ledger exists in this project. Read-only."
+    )
+    assert plan.ontology_required is True
+    assert plan.graph_required is False
+    assert plan.ontology_mode != "graph_path"
+    assert plan.requires_model_queen is False
+    assert plan.estimated_model_turns == 0
+
+
+def test_explicit_english_edge_path_still_requires_graph() -> None:
+    plan = classify_goal("Use OpenCrab evidence to inspect the edge path for E4.")
+    assert plan.graph_required is True
+    assert plan.ontology_mode == "graph_path"
+
+
 def test_simple_graph_goal_keeps_oracle_local_for_token_efficiency() -> None:
     plan = classify_goal("오픈크랩 그래프의 관계와 연결 경로를 확인해줘")
     assert plan.graph_required is True
