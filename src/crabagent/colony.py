@@ -65,6 +65,59 @@ ROLE_IDLE_TIMEOUT_SECONDS = {
     Role.ORACLE: 1800.0,
 }
 
+_HOST_WORKER_ARTIFACT_PREFIX = "HOST_WORKER_ARTIFACT_V1:"
+_HOST_WORKER_ARTIFACT_ROOT = ".crabagent/artifacts/"
+_HOST_WORKER_ARTIFACT_MAX_BYTES = 16 * 1024
+_HOST_WORKER_ARTIFACT_SUFFIXES = frozenset({".md", ".txt", ".json"})
+_HOST_WORKER_ARTIFACT_FILENAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+
+
+def _parse_host_worker_artifact_directive(text: str) -> tuple[str, Optional[Dict[str, Any]]]:
+    lines = str(text or "").splitlines()
+    matches = [(index, line[len(_HOST_WORKER_ARTIFACT_PREFIX):]) for index, line in enumerate(lines) if line.startswith(_HOST_WORKER_ARTIFACT_PREFIX)]
+    if not matches:
+        return str(text or "").strip(), None
+    if len(matches) != 1:
+        raise ValueError("HOST_WORKER_ARTIFACT_V1 requires exactly one directive line")
+    index, raw_payload = matches[0]
+    try:
+        payload = json.loads(raw_payload)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("HOST_WORKER_ARTIFACT_V1 payload must be one valid JSON object") from exc
+    if not isinstance(payload, dict) or set(payload) != {"relative_path", "content"}:
+        raise ValueError("HOST_WORKER_ARTIFACT_V1 supports only relative_path and content")
+    relative_path = str(payload.get("relative_path") or "").strip()
+    artifact_content = payload.get("content")
+    if not isinstance(artifact_content, str) or not artifact_content:
+        raise ValueError("HOST_WORKER_ARTIFACT_V1 content must be non-empty UTF-8 text")
+    if not relative_path.startswith(_HOST_WORKER_ARTIFACT_ROOT):
+        raise ValueError("HOST_WORKER_ARTIFACT_V1 path must be under .crabagent/artifacts")
+    filename = relative_path[len(_HOST_WORKER_ARTIFACT_ROOT):]
+    if (
+        not filename
+        or len(filename) > 128
+        or filename.startswith(".")
+        or filename.startswith("mission-")
+        or "/" in filename
+        or "\\" in filename
+        or any(character not in _HOST_WORKER_ARTIFACT_FILENAME_CHARS for character in filename)
+    ):
+        raise ValueError("HOST_WORKER_ARTIFACT_V1 requires one safe direct-child artifact filename")
+    if Path(filename).suffix.lower() not in _HOST_WORKER_ARTIFACT_SUFFIXES:
+        raise ValueError("HOST_WORKER_ARTIFACT_V1 allows only .md, .txt, or .json artifacts")
+    encoded = artifact_content.encode("utf-8")
+    if len(encoded) > _HOST_WORKER_ARTIFACT_MAX_BYTES:
+        raise ValueError("HOST_WORKER_ARTIFACT_V1 content exceeds 16 KiB")
+    cleaned = "\n".join(lines[:index] + lines[index + 1:]).strip()
+    if not cleaned:
+        cleaned = "Bounded host-worker artifact prepared."
+    return cleaned, {
+        "relative_path": _HOST_WORKER_ARTIFACT_ROOT + filename,
+        "content": artifact_content,
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
 
 def _usage_total(usage: Dict[str, Any]) -> Optional[int]:
     last = usage.get("last") if isinstance(usage.get("last"), dict) else usage
@@ -2060,6 +2113,82 @@ class ColonyExecutor:
         budget = int(max_chars or self.goal_plan.get("context_char_budget") or 4200)
         return compact_context(self.opencrab_receipt or {}, max_chars=max(1200, min(budget, 7000)))
 
+    def _apply_host_worker_artifact(
+        self,
+        mission_id: str,
+        task: Dict[str, Any],
+        attempt_id: str,
+        content: str,
+    ) -> str:
+        cleaned, spec = _parse_host_worker_artifact_directive(content)
+        if spec is None:
+            raise RuntimeError("HOST_WORKER_ARTIFACT_REQUIRED: write-required host WORKER must return one bounded artifact directive")
+        snapshot = self.store.inspect(mission_id)
+        approved = any(
+            str(row.get("action") or "") == "write_local_demo_artifacts"
+            and str(row.get("decision") or "").casefold() == "approved"
+            for row in (snapshot.get("approvals") or [])
+        )
+        if not approved:
+            raise RuntimeError("HOST_WORKER_ARTIFACT_NOT_APPROVED: mission lacks write_local_demo_artifacts approval")
+
+        runtime_root = self.service.workspace / ".crabagent"
+        artifact_root = runtime_root / "artifacts"
+        if runtime_root.exists() and runtime_root.is_symlink():
+            raise RuntimeError("HOST_WORKER_ARTIFACT_PATH_UNSAFE: .crabagent cannot be a symlink")
+        if artifact_root.exists() and artifact_root.is_symlink():
+            raise RuntimeError("HOST_WORKER_ARTIFACT_PATH_UNSAFE: artifacts cannot be a symlink")
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        resolved_root = artifact_root.resolve()
+        target = self.service.workspace / str(spec["relative_path"])
+        if target.parent.resolve() != resolved_root:
+            raise RuntimeError("HOST_WORKER_ARTIFACT_PATH_UNSAFE: target escaped artifact root")
+        if target.exists() or target.is_symlink():
+            raise RuntimeError("HOST_WORKER_ARTIFACT_EXISTS: bounded host artifact never overwrites an existing path")
+
+        encoded = str(spec["content"]).encode("utf-8")
+        created = False
+        try:
+            with target.open("xb") as handle:
+                created = True
+                handle.write(encoded)
+                handle.flush()
+        except Exception:
+            if created:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+            raise
+
+        receipt_id = self.store.add_tool_receipt(
+            mission_id,
+            str(task["task_id"]),
+            attempt_id,
+            "host.worker.artifact.write",
+            "success",
+            {
+                "relative_path": str(spec["relative_path"]),
+                "sha256": str(spec["sha256"]),
+                "bytes": int(spec["bytes"]),
+                "mode": "exclusive_create",
+                "source": "host_current_model",
+            },
+        )
+        self.store.append_event(
+            mission_id,
+            "host_worker_artifact_written",
+            Role.WORKER.value,
+            {
+                "task_id": str(task["task_id"]),
+                "receipt_id": receipt_id,
+                "relative_path": str(spec["relative_path"]),
+                "sha256": str(spec["sha256"]),
+                "bytes": int(spec["bytes"]),
+            },
+        )
+        return cleaned
+
     def _prompt(self, role: Role, objective: str, context: List[str]) -> str:
         prior_parts = [item[-1400:] for item in context[-3:]]
         prior = "\n\n".join(prior_parts) or "No prior role output."
@@ -2210,6 +2339,18 @@ class ColonyExecutor:
                 "Return exactly these sections: GOAL_RESTATEMENT, SUBGOALS, CONSTRAINTS, SUCCESS_CHECKS, NEXT_ACTION. "
                 "The user objective and goal graph are authoritative. Do not claim evidence retrieval or tool execution."
             )
+        if (
+            role is Role.WORKER
+            and bool(self.goal_plan.get("requires_write"))
+            and str(getattr(self.bridge, "executor_name", "")) == "host_current_model"
+        ):
+            rendered += (
+                "\n\nHOST WORKER ARTIFACT CONTRACT:\n"
+                "The host text channel cannot directly edit arbitrary workspace files. If this bounded task can be satisfied by exactly one mission-local text artifact, include exactly one physical line in your response using this syntax: "
+                "HOST_WORKER_ARTIFACT_V1:{\"relative_path\":\".crabagent/artifacts/<safe-name>.md\",\"content\":\"<UTF-8 text with JSON escapes>\"}. "
+                "Only a direct-child .md, .txt, or .json artifact is supported, maximum 16 KiB, and existing files are never overwritten. "
+                "Do not emit this directive for any other path or for a task that needs source/user/external mutation; fail closed instead."
+            )
         if role is Role.QUEEN and repair_contract:
             rendered += repair_contract
         prompt_budget = max(3600, min(12000, int(self.goal_plan.get("context_char_budget") or 4200) + 1800))
@@ -2234,6 +2375,16 @@ class ColonyExecutor:
             compact_result += (
                 "\n\nKING OUTPUT CONTRACT:\n"
                 "Return exactly GOAL_RESTATEMENT, SUBGOALS, CONSTRAINTS, SUCCESS_CHECKS, NEXT_ACTION."
+            )
+        if (
+            role is Role.WORKER
+            and bool(self.goal_plan.get("requires_write"))
+            and str(getattr(self.bridge, "executor_name", "")) == "host_current_model"
+        ):
+            compact_result += (
+                "\n\nHOST WORKER ARTIFACT CONTRACT: include exactly one one-line "
+                "HOST_WORKER_ARTIFACT_V1 JSON directive for one direct-child .md/.txt/.json under .crabagent/artifacts, max 16 KiB, no overwrite. "
+                "If the task cannot fit that boundary, fail closed."
             )
         if role is Role.QUEEN and repair_contract:
             compact_result += repair_contract
@@ -2413,6 +2564,10 @@ class ColonyExecutor:
             if reported_model:
                 actual_model = reported_model
             content = turn.text or "Model turn completed without a textual response. Inspect tool receipts and workspace changes."
+            if executor_name == "host_current_model" and _HOST_WORKER_ARTIFACT_PREFIX in content and role is not Role.WORKER:
+                raise RuntimeError("HOST_WORKER_ARTIFACT_ROLE_INVALID: artifact directives are accepted only from WORKER")
+            if role is Role.WORKER and executor_name == "host_current_model" and bool(self.goal_plan.get("requires_write")):
+                content = self._apply_host_worker_artifact(mission_id, task, attempt["attempt_id"], content)
             if role is Role.QUEEN and self.goal_plan.get("ontology_required"):
                 content = self._normalize_queen_interpretation(content)
             turn_tokens = _usage_total(turn.usage)

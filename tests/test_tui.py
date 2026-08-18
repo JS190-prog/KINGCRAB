@@ -323,8 +323,15 @@ def test_tui_mounts_real_command_deck_without_a_daemon(tmp_path: Path) -> None:
             await pilot.click("#show-panels")
             assert app.query_one("#left").styles.display == "block"
             await pilot.click("#hide-right")
+            await pilot.pause()
             await pilot.click("#show-panels")
-            assert app.query_one("#right").styles.display == "block"
+            right_display = ""
+            for _ in range(10):
+                await pilot.pause()
+                right_display = app.query_one("#right").styles.display
+                if right_display == "block":
+                    break
+            assert right_display == "block"
             app._apply_panel_layout(100)
             assert app.query_one("#left").styles.display == "none"
             assert app.query_one("#right").styles.display == "none"
@@ -609,10 +616,13 @@ def test_ontology_titles_reflow_when_right_panel_is_widened(tmp_path: Path) -> N
             app._begin_panel_resize("right", divider.region.x)
             app._drag_panel_resize("right", divider.region.x - 20)
             app._end_panel_resize()
-            await pilot.pause()
-
-            options = app.query_one("#ontology-options").options
-            after = str(next(option.prompt for option in options if option.id == "pack:k-long"))
+            after = ""
+            for _ in range(10):
+                await pilot.pause()
+                options = app.query_one("#ontology-options").options
+                after = str(next(option.prompt for option in options if option.id == "pack:k-long"))
+                if title in after:
+                    break
             assert title in after
             assert "\n" not in after
 

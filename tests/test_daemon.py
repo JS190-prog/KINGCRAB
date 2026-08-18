@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from pathlib import Path
@@ -134,7 +135,7 @@ def test_host_executor_runs_durable_model_turns_without_codex(tmp_path: Path) ->
             "action": "prompt.submit",
             "payload": {
                 "session_id": session["session_id"],
-                "objective": "Create bounded_note.txt with one line hello",
+                "objective": "Create exactly one mission-local artifact .crabagent/artifacts/bounded_note.txt with one line hello",
                 "disposition": "start",
                 "interaction": "colony",
             },
@@ -161,7 +162,16 @@ def test_host_executor_runs_durable_model_turns_without_codex(tmp_path: Path) ->
             if host:
                 assert host["payload"]["params"]["workspace"] == str(tmp_path.resolve())
                 assert host["payload"]["params"]["projectRoot"] == str(tmp_path.resolve())
-                (tmp_path / "bounded_note.txt").write_text("hello\n", encoding="utf-8")
+                response_text = "bounded host-model result"
+                if str(host.get("prompt") or "").startswith("CRABAGENT ROLE: WORKER"):
+                    assert "HOST WORKER ARTIFACT CONTRACT" in host["prompt"]
+                    response_text += "\nHOST_WORKER_ARTIFACT_V1:" + json.dumps(
+                        {
+                            "relative_path": ".crabagent/artifacts/bounded_note.txt",
+                            "content": "hello\n",
+                        },
+                        separators=(",", ":"),
+                    )
                 server.dispatch({
                     "action": "runtime.respond",
                     "payload": {
@@ -169,7 +179,7 @@ def test_host_executor_runs_durable_model_turns_without_codex(tmp_path: Path) ->
                         "request_id": host["request_id"],
                         "approve": True,
                         "result": {
-                            "text": "bounded host-model result",
+                            "text": response_text,
                             "model": "gpt-5.6-sol",
                             "usage": {"totalTokens": 32},
                         },
@@ -196,6 +206,14 @@ def test_host_executor_runs_durable_model_turns_without_codex(tmp_path: Path) ->
         assert any(row["executor"] == "host_current_model" for row in snapshot["attempts"])
         assert not any(row["executor"] == "codex_app_server" for row in snapshot["attempts"])
         assert any(row["tool_name"] == "host.current-model.turn" for row in snapshot["tool_receipts"])
+        artifact_path = tmp_path / ".crabagent" / "artifacts" / "bounded_note.txt"
+        assert artifact_path.read_text(encoding="utf-8") == "hello\n"
+        write_receipts = [row for row in snapshot["tool_receipts"] if row["tool_name"] == "host.worker.artifact.write"]
+        assert len(write_receipts) == 1
+        assert write_receipts[0]["observed"]["relative_path"] == ".crabagent/artifacts/bounded_note.txt"
+        assert write_receipts[0]["observed"]["bytes"] == 6
+        assert write_receipts[0]["observed"]["mode"] == "exclusive_create"
+        assert any(row["tool_name"] == "crab.workspace.diff" and row["observed"].get("changed_file_count") == 1 for row in snapshot["tool_receipts"])
     finally:
         server.server_close()
         if paths["socket"].exists():

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from crabagent.models import MissionStatus, Role, WorkerPolicy, worker_capacity
-from crabagent.colony import ColonyExecutor, _usage_total
+from crabagent.colony import ColonyExecutor, _parse_host_worker_artifact_directive, _usage_total
 from crabagent.runtime import RuntimeService
 from crabagent.store import ColonyStore
 
@@ -30,6 +30,37 @@ EXPECTED_TABLES = {
     "integration_cache",
     "session_ontology_context",
 }
+
+
+def test_host_worker_artifact_directive_is_strict_and_bounded() -> None:
+    cleaned, spec = _parse_host_worker_artifact_directive(
+        "RESULT: verified\nHOST_WORKER_ARTIFACT_V1:"
+        + __import__("json").dumps(
+            {"relative_path": ".crabagent/artifacts/canary.md", "content": "hello\n"},
+            separators=(",", ":"),
+        )
+    )
+    assert cleaned == "RESULT: verified"
+    assert spec is not None
+    assert spec["relative_path"] == ".crabagent/artifacts/canary.md"
+    assert spec["bytes"] == 6
+    assert len(spec["sha256"]) == 64
+
+    invalid = [
+        'HOST_WORKER_ARTIFACT_V1:{"relative_path":"../escape.md","content":"x"}',
+        'HOST_WORKER_ARTIFACT_V1:{"relative_path":".crabagent/artifacts/nested/x.md","content":"x"}',
+        'HOST_WORKER_ARTIFACT_V1:{"relative_path":".crabagent/artifacts/run.py","content":"x"}',
+        'HOST_WORKER_ARTIFACT_V1:{"relative_path":".crabagent/artifacts/mission-hidden.md","content":"x"}',
+        'HOST_WORKER_ARTIFACT_V1:{"relative_path":".crabagent/artifacts/a.md","content":"x"}\nHOST_WORKER_ARTIFACT_V1:{"relative_path":".crabagent/artifacts/b.md","content":"y"}',
+    ]
+    for text in invalid:
+        with pytest.raises(ValueError):
+            _parse_host_worker_artifact_directive(text)
+    oversized = 'x' * (16 * 1024 + 1)
+    with pytest.raises(ValueError, match="16 KiB"):
+        _parse_host_worker_artifact_directive(
+            'HOST_WORKER_ARTIFACT_V1:' + __import__("json").dumps({"relative_path": ".crabagent/artifacts/too-big.txt", "content": oversized})
+        )
 
 
 def test_initialize_creates_all_durable_contract_tables(tmp_path: Path) -> None:
