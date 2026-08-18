@@ -185,6 +185,14 @@ until both coverage and decision gates pass. This makes the ontology path
 operational: a pack is no longer merely context attached to a prompt; it must
 fill named work slots before a result can be accepted.
 
+After QUEEN fills the decision slots, the runtime promotes the execution
+contract to the durable `ontology_ledger` artifact. The artifact carries the
+same `mission_id`, `goal_graph_id` and revision identity as its source
+contract; `ColonyStore` persists it and verifies the file bytes on readback.
+SOLDIER may create a new ledger revision only after a bounded Queen-handoff
+repair. ORACLE's preflight and final gate require that persisted/readback
+ledger, not merely an artifact row with the right kind.
+
 `0.6.27` adds the kinetic runtime contract. `kinetic_workflow.json` is compiled
 from the goal plan before execution; `kinetic_workflow_state.json` records each
 operator transition after execution. The workflow is not a second model plan:

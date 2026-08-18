@@ -45,6 +45,9 @@ def test_lookup_compiles_to_typed_observation_operator_without_write_or_model() 
     assert plan.action_mode == "lookup"
     assert steps["decide_from_ontology"]["operator"] == "project_observed_items"
     assert steps["decide_from_ontology"]["model_required"] is False
+    assert steps["persist_ontology_ledger"]["operator"] == "persist_ontology_ledger"
+    assert steps["persist_ontology_ledger"]["gate"] == "durable_ledger_readback"
+    assert workflow["output_contract"]["ontology_ledger_required"] is True
     assert "execute_action" not in steps
     assert workflow["token_policy"]["allow_full_catalog_in_prompt"] is False
     assert "evidence_can_only_enter_from_observed_mcp_receipt" in workflow["state_invariants"]
@@ -92,6 +95,13 @@ def test_metadata_lookup_runs_to_oracle_with_zero_model_turns(tmp_path: Path) ->
     state_payload = json.loads(Path(state["path"]).read_text(encoding="utf-8"))
     assert state_payload["summary"]["completed_step_count"] >= 6
     assert any(row["step_id"] == "retrieve_evidence" and row["status"] == "completed" for row in state_payload["trace"])
+    assert any(row["step_id"] == "persist_ontology_ledger" and row["status"] == "completed" for row in state_payload["trace"])
+    ledger = next(row for row in snapshot["artifacts"] if row["kind"] == "ontology_ledger")
+    ledger_payload = json.loads(Path(ledger["path"]).read_text(encoding="utf-8"))
+    assert ledger_payload["mission_id"] == snapshot["mission"]["mission_id"]
+    assert ledger_payload["goal_graph_id"] == snapshot["goal_graph"]["graph_id"]
+    assert ledger_payload["revision"] >= 1
+    assert snapshot["ontology_ledger"]["readback"]["validated"] is True
     receipt = next(row for row in snapshot["artifacts"] if row["kind"] == "mcp_context_receipt")
     receipt_payload = json.loads(Path(receipt["path"]).read_text(encoding="utf-8"))
     assert receipt_payload["evidence_count"] == 0

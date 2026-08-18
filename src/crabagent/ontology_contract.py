@@ -2,10 +2,188 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, TypedDict
 
 
 ONTOLOGY_CONTRACT_SCHEMA = "crab.ontology-execution-contract/v1"
+ONTOLOGY_EXECUTION_CONTRACT_KIND = "ontology_execution_contract"
+ONTOLOGY_LEDGER_SCHEMA = "crab.ontology-ledger/v1"
+ONTOLOGY_LEDGER_KIND = "ontology_ledger"
+
+
+class OntologyLedger(TypedDict, total=False):
+    """JSON contract for the durable QUEEN-to-ORACLE ledger artifact."""
+
+    schema: str
+    artifact_kind: str
+    mission_id: str
+    goal_graph_id: str
+    revision: int
+    source: Dict[str, Any]
+    execution_contract: Dict[str, Any]
+    observed_receipt: Dict[str, Any]
+    queen_handoff: Dict[str, Any]
+    evidence: List[Dict[str, Any]]
+    paths: List[Dict[str, Any]]
+    observed_items: List[Dict[str, Any]]
+    objective: str
+    route: Dict[str, Any]
+    evidence_slots: List[Dict[str, Any]]
+    decision_slots: List[Dict[str, Any]]
+    action_contract: Dict[str, Any]
+    coverage: Dict[str, Any]
+    decision_gate: str
+    promoted_at: str
+
+
+def _json_copy(value: Any) -> Any:
+    """Copy JSON-shaped contract data without sharing mutable nested values."""
+    return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def validate_ontology_ledger(
+    ledger: Dict[str, Any],
+    *,
+    mission_id: str = "",
+    goal_graph_id: str = "",
+    revision: Optional[int] = None,
+) -> bool:
+    """Validate the durable ledger identity and its source contract.
+
+    ORACLE must consume a persisted ledger, not a same-process object.  Keep
+    this validator deliberately structural: evidence truth is still decided
+    by the OpenCrab receipt and the existing ontology gates.
+    """
+    if not isinstance(ledger, dict):
+        raise ValueError("ontology ledger must be a JSON object")
+    if ledger.get("schema") != ONTOLOGY_LEDGER_SCHEMA:
+        raise ValueError("unsupported ontology ledger schema")
+    if ledger.get("artifact_kind") != ONTOLOGY_LEDGER_KIND:
+        raise ValueError("ontology ledger artifact kind mismatch")
+    stored_mission_id = str(ledger.get("mission_id") or "").strip()
+    stored_graph_id = str(ledger.get("goal_graph_id") or "").strip()
+    if not stored_mission_id:
+        raise ValueError("ontology ledger mission_id is required")
+    if not stored_graph_id:
+        raise ValueError("ontology ledger goal_graph_id is required")
+    try:
+        stored_revision = int(ledger.get("revision"))
+    except (TypeError, ValueError):
+        raise ValueError("ontology ledger revision must be a positive integer")
+    if stored_revision < 1:
+        raise ValueError("ontology ledger revision must be a positive integer")
+    if mission_id and stored_mission_id != str(mission_id).strip():
+        raise ValueError("ontology ledger mission_id mismatch")
+    if goal_graph_id and stored_graph_id != str(goal_graph_id).strip():
+        raise ValueError("ontology ledger goal_graph_id mismatch")
+    if revision is not None and stored_revision != int(revision):
+        raise ValueError("ontology ledger revision mismatch")
+    source = ledger.get("source")
+    if not isinstance(source, dict):
+        raise ValueError("ontology ledger source metadata is required")
+    if source.get("artifact_kind") != ONTOLOGY_EXECUTION_CONTRACT_KIND:
+        raise ValueError("ontology ledger source artifact kind mismatch")
+    source_revision = int(source.get("revision") or 0)
+    if source_revision != stored_revision:
+        raise ValueError("ontology ledger source revision mismatch")
+    contract = ledger.get("execution_contract")
+    if not isinstance(contract, dict):
+        raise ValueError("ontology ledger execution_contract is required")
+    if contract.get("artifact_kind") not in {None, ONTOLOGY_EXECUTION_CONTRACT_KIND}:
+        raise ValueError("ontology execution contract artifact kind mismatch")
+    contract_mission_id = str(contract.get("mission_id") or stored_mission_id).strip()
+    contract_graph_id = str(contract.get("goal_graph_id") or "").strip()
+    contract_revision = int(contract.get("revision") or stored_revision)
+    if contract_mission_id != stored_mission_id:
+        raise ValueError("ontology ledger source mission_id mismatch")
+    if contract_graph_id != stored_graph_id:
+        raise ValueError("ontology ledger source goal_graph_id mismatch")
+    if contract_revision != stored_revision:
+        raise ValueError("ontology ledger source contract revision mismatch")
+    return True
+
+
+def promote_execution_contract_to_ledger(
+    contract: Dict[str, Any],
+    mission_id: str = "",
+    revision: Optional[int] = None,
+    *,
+    source_artifact_id: str = "",
+    observed_receipt: Optional[Dict[str, Any]] = None,
+    queen_handoff: Optional[Dict[str, Any]] = None,
+    promoted_at: str = "",
+) -> Dict[str, Any]:
+    """Promote one execution-contract revision into the ORACLE ledger.
+
+    The execution contract remains the source of slot state.  The promoted
+    ledger adds durable artifact identity and a bounded receipt projection so
+    a fresh process can validate the same handoff without trusting in-memory
+    state.
+    """
+    if not isinstance(contract, dict):
+        raise ValueError("ontology execution contract must be a JSON object")
+    resolved_mission_id = str(mission_id or contract.get("mission_id") or "").strip()
+    resolved_graph_id = str(contract.get("goal_graph_id") or "").strip()
+    if not resolved_mission_id:
+        raise ValueError("mission_id is required to promote an ontology ledger")
+    if not resolved_graph_id:
+        raise ValueError("goal_graph_id is required to promote an ontology ledger")
+    resolved_revision = int(revision if revision is not None else contract.get("revision") or 1)
+    if resolved_revision < 1:
+        raise ValueError("revision must be a positive integer")
+    source_contract = _json_copy(contract)
+    source_contract["artifact_kind"] = ONTOLOGY_EXECUTION_CONTRACT_KIND
+    source_contract["mission_id"] = resolved_mission_id
+    source_contract["goal_graph_id"] = resolved_graph_id
+    source_contract["revision"] = resolved_revision
+    ledger: Dict[str, Any] = {
+        "schema": ONTOLOGY_LEDGER_SCHEMA,
+        "artifact_kind": ONTOLOGY_LEDGER_KIND,
+        "mission_id": resolved_mission_id,
+        "goal_graph_id": resolved_graph_id,
+        "revision": resolved_revision,
+        "source": {
+            "artifact_kind": ONTOLOGY_EXECUTION_CONTRACT_KIND,
+            "artifact_id": str(source_artifact_id or ""),
+            "revision": resolved_revision,
+        },
+        "execution_contract": source_contract,
+        "objective": source_contract.get("objective"),
+        "route": _json_copy(source_contract.get("route") or {}),
+        "evidence_slots": _json_copy(source_contract.get("evidence_slots") or []),
+        "decision_slots": _json_copy(source_contract.get("decision_slots") or []),
+        "action_contract": _json_copy(source_contract.get("action_contract") or {}),
+        "coverage": _json_copy(source_contract.get("coverage") or {}),
+        "decision_gate": source_contract.get("decision_gate"),
+        "promoted_at": str(promoted_at or ""),
+    }
+    if observed_receipt is not None:
+        receipt = observed_receipt if isinstance(observed_receipt, dict) else {}
+        evidence = [row for row in receipt.get("evidence") or [] if isinstance(row, dict)]
+        ledger["observed_receipt"] = {
+            "status": receipt.get("status"),
+            "authority": receipt.get("authority"),
+            "claim_gate": receipt.get("claim_gate"),
+            "observation_gate": receipt.get("observation_gate"),
+            "graph_gate": receipt.get("graph_gate"),
+            "evidence_count": receipt.get("evidence_count", len(evidence)),
+            "observed_item_count": len([row for row in receipt.get("observed_items") or [] if isinstance(row, dict)]),
+            "path_count": len([row for row in receipt.get("paths") or [] if isinstance(row, dict)]),
+        }
+        ledger["evidence"] = [
+            {
+                "id": row.get("id") or row.get("evidence_id"),
+                "source": row.get("source") or row.get("source_uri"),
+                "text": " ".join(str(row.get("text") or row.get("content") or "").split())[:360],
+            }
+            for row in evidence[:8]
+        ]
+        ledger["paths"] = _json_copy([row for row in receipt.get("paths") or [] if isinstance(row, dict)][:12])
+        ledger["observed_items"] = _json_copy([row for row in receipt.get("observed_items") or [] if isinstance(row, dict)][:24])
+    if queen_handoff is not None:
+        ledger["queen_handoff"] = _json_copy(queen_handoff if isinstance(queen_handoff, dict) else {})
+    validate_ontology_ledger(ledger)
+    return ledger
 
 
 def _clean(value: Any, limit: int = 420) -> str:
@@ -256,6 +434,8 @@ def compile_ontology_execution_contract(
     receipt: Optional[Dict[str, Any]] = None,
     *,
     king_plan: Optional[Dict[str, Any]] = None,
+    mission_id: str = "",
+    revision: int = 1,
 ) -> Dict[str, Any]:
     """Compile the goal's ontology work into a slot-level execution ledger.
 
@@ -272,6 +452,9 @@ def compile_ontology_execution_contract(
     decision_slots = _build_decision_slots(graph)
     return {
         "schema": ONTOLOGY_CONTRACT_SCHEMA,
+        "artifact_kind": ONTOLOGY_EXECUTION_CONTRACT_KIND,
+        "mission_id": _clean(mission_id, 240),
+        "revision": max(1, int(revision or 1)),
         "authority": "user_goal_and_opencrab_mcp_receipt",
         "goal_graph_id": graph.get("graph_id"),
         "objective": _clean(plan.get("objective"), 800),

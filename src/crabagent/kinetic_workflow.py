@@ -128,6 +128,16 @@ def compile_kinetic_workflow(
                 gate="decision_slots",
             )
         )
+        steps.append(
+            _step(
+                "persist_ontology_ledger",
+                "persist_ontology_ledger",
+                "QUEEN",
+                ["ontology_execution_contract", "decision_packet"],
+                ["ontology_ledger"],
+                gate="durable_ledger_readback",
+            )
+        )
     if bool(plan.get("external_scouting")):
         steps.append(
             _step(
@@ -146,7 +156,7 @@ def compile_kinetic_workflow(
             "patrol_quality",
             "patrol_waste_and_gates",
             "SOLDIER",
-            ["decision_packet"] if ontology else ["goal_contract"],
+            (["decision_packet", "ontology_ledger"] if ontology else ["goal_contract"]),
             ["soldier_report"],
             gate="no_unresolved_required_gate",
         )
@@ -169,7 +179,8 @@ def compile_kinetic_workflow(
             "verify_result",
             "verify_and_publish_or_stop",
             "ORACLE",
-            ["decision_packet", "soldier_report"] + (["workspace_change"] if requires_write else []),
+            (["decision_packet", "ontology_ledger", "soldier_report"] if ontology else ["decision_packet", "soldier_report"])
+            + (["workspace_change"] if requires_write else []),
             ["oracle_verdict", "goal_outcome"],
             model_required=requires_oracle_model,
             gate="all_required_receipts",
@@ -201,6 +212,7 @@ def compile_kinetic_workflow(
             "decision_slots": list(graph.get("decision_slots") or []),
             "action_required": bool(plan.get("action_required")),
             "requires_write": requires_write,
+            "ontology_ledger_required": ontology,
         },
     }
 

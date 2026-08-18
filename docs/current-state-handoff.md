@@ -45,6 +45,11 @@ development session.
   slot blocks Soldier/Oracle instead of allowing a plausible conclusion. Each
   King subgoal Worker records its slot IDs and the evidence IDs it actually
   projected.
+- QUEEN then promotes that contract into an identity-bound `ontology_ledger`
+  revision. The store persists and hash-validates the ledger on readback;
+  SOLDIER and ORACLE require the matching `mission_id`, `goal_graph_id` and
+  revision before continuing. A bounded Queen-handoff repair creates and
+  persists a new ledger revision before ORACLE.
 - Every mission now persists `kinetic_workflow.json` before execution and
   `kinetic_workflow_state.json` after execution. The latter records actual
   `goal_bind`, `scope_lock`, retrieval, slot binding, decision, patrol,

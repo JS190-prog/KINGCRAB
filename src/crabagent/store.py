@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -29,6 +30,7 @@ from .models import (
     utc_now,
 )
 from .identity import COLONY_PROTOCOL_VERSION
+from .ontology_contract import ONTOLOGY_LEDGER_KIND, validate_ontology_ledger
 
 
 SCHEMA = """
@@ -1598,6 +1600,237 @@ class ColonyStore:
                 connection,
             )
 
+    def persist_ontology_ledger(
+        self,
+        mission_id: str,
+        *args: Any,
+        ledger: Optional[Dict[str, Any]] = None,
+        task_id: str = "",
+        filename: str = "ontology_ledger.json",
+    ) -> Dict[str, Any]:
+        """Persist one immutable ontology-ledger revision and read it back.
+
+        The positional compatibility forms are ``(mission_id, ledger)`` and
+        ``(mission_id, task_id, ledger)``.  The returned mapping exposes both
+        artifact metadata and the validated readback payload so callers cannot
+        accidentally continue with only the pre-persist in-memory object.
+        """
+        if args:
+            if len(args) == 1:
+                if isinstance(args[0], dict) and ledger is None:
+                    ledger = args[0]
+                elif not task_id:
+                    task_id = str(args[0] or "")
+            elif len(args) == 2:
+                if task_id or ledger is not None:
+                    raise TypeError("ontology ledger task_id/ledger supplied twice")
+                task_id = str(args[0] or "")
+                ledger = args[1]
+            else:
+                raise TypeError("persist_ontology_ledger accepts at most task_id and ledger")
+        if not isinstance(ledger, dict):
+            raise ValueError("ledger is required")
+        mission_id = str(mission_id or "").strip()
+        if not mission_id:
+            raise ValueError("mission_id is required")
+        validate_ontology_ledger(ledger, mission_id=mission_id)
+        if self.mission(mission_id) is None:
+            raise ValueError("unknown mission: %s" % mission_id)
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            with self.connection() as connection:
+                task_row = connection.execute(
+                    "SELECT task_id FROM task_slots WHERE mission_id = ? ORDER BY position DESC LIMIT 1",
+                    (mission_id,),
+                ).fetchone()
+            task_id = str(task_row["task_id"] or "") if task_row is not None else ""
+        if not task_id:
+            raise ValueError("task_id is required to persist an ontology ledger")
+        filename = Path(str(filename or "ontology_ledger.json")).name
+        if filename in {"", ".", ".."} or not filename.endswith(".json"):
+            raise ValueError("ontology ledger filename must be a JSON filename")
+
+        encoded = json.dumps(ledger, ensure_ascii=False, indent=2) + "\n"
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        revision = int(ledger["revision"])
+        graph_id = str(ledger["goal_graph_id"])
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM artifacts WHERE mission_id = ? AND kind = ? ORDER BY created_at DESC, rowid DESC",
+                (mission_id, ONTOLOGY_LEDGER_KIND),
+            ).fetchall()
+        versioned_filename = "ontology_ledger_r%04d.json" % revision
+        for row in rows:
+            if str(row["status"] or "") not in {
+                ArtifactStatus.CANDIDATE.value,
+                ArtifactStatus.ACCEPTED.value,
+            }:
+                if Path(str(row["path"])).name in {filename, versioned_filename}:
+                    raise RuntimeError("ontology ledger artifact is not in a readable state")
+                continue
+            try:
+                existing = json.loads(Path(str(row["path"])).read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                if Path(str(row["path"])).name in {filename, versioned_filename}:
+                    raise RuntimeError("existing ontology ledger revision is unreadable")
+                continue
+            try:
+                same_identity = (
+                    str(existing.get("mission_id") or "") == mission_id
+                    and str(existing.get("goal_graph_id") or "") == graph_id
+                    and int(existing.get("revision") or 0) == revision
+                )
+            except (TypeError, ValueError):
+                same_identity = False
+            if not same_identity:
+                continue
+            try:
+                validate_ontology_ledger(
+                    existing,
+                    mission_id=mission_id,
+                    goal_graph_id=graph_id,
+                    revision=revision,
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("existing ontology ledger revision is invalid") from exc
+            if str(row["sha256"]) != digest:
+                raise ValueError(
+                    "ontology ledger revision already exists with a different payload: %s/%s/%s"
+                    % (mission_id, graph_id, revision)
+                )
+            artifact = dict(row)
+            readback = self.get_latest_ontology_ledger(
+                mission_id,
+                goal_graph_id=graph_id,
+                revision=revision,
+            )
+            if readback is None:
+                raise RuntimeError("ontology ledger idempotent readback failed")
+            return {
+                **artifact,
+                "artifact": artifact,
+                "ledger": readback,
+                "readback": readback,
+                "idempotent": True,
+            }
+
+        directory = self.artifacts_dir / mission_id
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / filename
+        if path.exists():
+            # Preserve an older revision's path.  The first revision retains
+            # the stable public filename; later revisions get a deterministic
+            # suffix rather than invalidating an earlier artifact row.
+            filename = "ontology_ledger_r%04d.json" % revision
+            path = directory / filename
+        # Keep the digest byte-exact across Windows newline translation.  The
+        # artifact contract hashes the bytes that ORACLE reads back.
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(encoded)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        artifact = Artifact(
+            artifact_id=new_id("artifact"),
+            mission_id=mission_id,
+            task_id=task_id,
+            kind=ONTOLOGY_LEDGER_KIND,
+            path=str(path),
+            sha256=digest,
+            status=ArtifactStatus.CANDIDATE,
+        )
+        self.add_artifact(artifact)
+        readback = self.get_latest_ontology_ledger(
+            mission_id,
+            goal_graph_id=graph_id,
+            revision=revision,
+        )
+        if readback is None:
+            raise RuntimeError("ontology ledger persisted but readback validation failed")
+        artifact_dict = {
+            "artifact_id": artifact.artifact_id,
+            "mission_id": artifact.mission_id,
+            "task_id": artifact.task_id,
+            "kind": artifact.kind,
+            "path": artifact.path,
+            "sha256": artifact.sha256,
+            "status": artifact.status.value,
+            "created_at": artifact.created_at,
+        }
+        return {
+            **artifact_dict,
+            "artifact": artifact_dict,
+            "ledger": readback,
+            "readback": readback,
+            "idempotent": False,
+        }
+
+    def get_latest_ontology_ledger(
+        self,
+        mission_id: str,
+        *,
+        goal_graph_id: str = "",
+        revision: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return only a hash- and identity-validated persisted ledger."""
+        mission_id = str(mission_id or "").strip()
+        if not mission_id:
+            return None
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM artifacts WHERE mission_id = ? AND kind = ? ORDER BY created_at DESC, rowid DESC",
+                (mission_id, ONTOLOGY_LEDGER_KIND),
+            ).fetchall()
+        expected_graph = str(goal_graph_id or "").strip()
+        expected_revision = int(revision) if revision is not None else None
+        for index, row in enumerate(rows):
+            if str(row["status"] or "") not in {
+                ArtifactStatus.CANDIDATE.value,
+                ArtifactStatus.ACCEPTED.value,
+            }:
+                if index == 0 and expected_revision is None:
+                    return None
+                continue
+            try:
+                path = Path(str(row["path"]))
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                validate_ontology_ledger(
+                    payload,
+                    mission_id=mission_id,
+                    goal_graph_id=expected_graph,
+                    revision=expected_revision,
+                )
+                actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                # Without an explicit revision, never fall back to an older
+                # ledger when the newest durable row is unreadable.
+                if index == 0 and expected_revision is None:
+                    return None
+                continue
+            if actual_digest != str(row["sha256"]):
+                if index == 0 and expected_revision is None:
+                    return None
+                continue
+            result = dict(payload)
+            result["_artifact"] = {
+                "artifact_id": row["artifact_id"],
+                "mission_id": row["mission_id"],
+                "task_id": row["task_id"],
+                "kind": row["kind"],
+                "path": row["path"],
+                "sha256": row["sha256"],
+                "status": row["status"],
+                "created_at": row["created_at"],
+            }
+            result["readback"] = {
+                "validated": True,
+                "artifact_id": row["artifact_id"],
+                "sha256": row["sha256"],
+                "mission_id": mission_id,
+                "goal_graph_id": result["goal_graph_id"],
+                "revision": int(result["revision"]),
+            }
+            return result
+        return None
+
     def set_artifact_status(self, artifact_id: str, status: ArtifactStatus, actor: Role) -> None:
         with self.connection() as connection:
             row = connection.execute(
@@ -1798,6 +2031,10 @@ class ColonyStore:
         goal_graph = artifact_json("goal_graph")
         kinetic_workflow = artifact_json("kinetic_workflow")
         ontology_execution_contract = artifact_json("ontology_execution_contract")
+        ontology_ledger = self.get_latest_ontology_ledger(
+            mission_id,
+            goal_graph_id=str((goal_graph or {}).get("graph_id") or ""),
+        )
         king_plan = artifact_json("king_plan")
         subgoal_plan = artifact_json("subgoal_plan")
         return {
@@ -1806,6 +2043,7 @@ class ColonyStore:
             "goal_graph": goal_graph,
             "kinetic_workflow": kinetic_workflow,
             "ontology_execution_contract": ontology_execution_contract,
+            "ontology_ledger": ontology_ledger,
             "king_plan": king_plan,
             "subgoal_plan": subgoal_plan,
             "tasks": tasks,

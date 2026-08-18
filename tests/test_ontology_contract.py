@@ -6,7 +6,9 @@ from crabagent.goal import classify_goal
 from crabagent.goal_graph import compile_goal_graph
 from crabagent.ontology_contract import (
     compile_ontology_execution_contract,
+    promote_execution_contract_to_ledger,
     update_decision_gate,
+    validate_ontology_ledger,
 )
 
 
@@ -91,3 +93,40 @@ def test_decision_gate_stays_blocked_without_a_decision_section() -> None:
 
     assert contract["decision_gate"] == "blocked"
     assert contract["decision_slots"][0]["status"] == "missing"
+
+
+def test_execution_contract_promotes_to_identity_bound_ledger() -> None:
+    plan, graph = _plan_and_graph("오픈크랩 팩의 근거를 비교해서 전략을 추천해줘")
+    contract = compile_ontology_execution_contract(
+        plan,
+        graph,
+        {
+            "status": "ok",
+            "claim_gate": "pass",
+            "graph_gate": "not_required",
+            "evidence": [
+                {
+                    "id": "ev-12345678",
+                    "source": "opencrab://pack/chunk-1",
+                    "text": "관측된 근거",
+                }
+            ],
+        },
+        mission_id="mission-ledger",
+        revision=7,
+    )
+
+    ledger = promote_execution_contract_to_ledger(
+        contract,
+        mission_id="mission-ledger",
+        source_artifact_id="artifact-contract",
+        observed_receipt={"status": "ok", "claim_gate": "pass", "evidence": []},
+    )
+
+    assert ledger["artifact_kind"] == "ontology_ledger"
+    assert ledger["mission_id"] == "mission-ledger"
+    assert ledger["goal_graph_id"] == graph["graph_id"]
+    assert ledger["revision"] == 7
+    assert ledger["source"]["artifact_kind"] == "ontology_execution_contract"
+    assert ledger["execution_contract"]["revision"] == 7
+    assert validate_ontology_ledger(ledger, mission_id="mission-ledger", revision=7)

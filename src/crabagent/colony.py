@@ -36,9 +36,11 @@ from .opencrab import (
 )
 from .ontology_context import OntologyContextCollector, _model_evidence, compact_context
 from .ontology_contract import (
+    ONTOLOGY_LEDGER_KIND,
     attach_subgoal_slots,
     compact_ontology_execution_contract,
     compile_ontology_execution_contract,
+    promote_execution_contract_to_ledger,
     update_decision_gate,
 )
 from .goal_graph import compact_goal_graph, compile_goal_graph
@@ -338,11 +340,14 @@ class ColonyExecutor:
         """
         if not self.goal_plan.get("ontology_required"):
             return {}
+        previous_revision = int(self.ontology_contract.get("revision") or 0)
         contract = compile_ontology_execution_contract(
             self.goal_plan,
             self.goal_graph or compile_goal_graph(self.goal_plan),
             self.opencrab_receipt or None,
             king_plan=self.king_plan,
+            mission_id=mission_id,
+            revision=previous_revision + 1 if previous_revision else 1,
         )
         if self.king_plan.get("subgoals"):
             contract["king_subgoals"] = []
@@ -375,6 +380,86 @@ class ColonyExecutor:
             },
         )
         return contract
+
+    def _persist_ontology_ledger(
+        self,
+        mission_id: str,
+        task_id: str,
+        context: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Promote QUEEN's contract, persist it, and require readback."""
+        if not self.goal_plan.get("ontology_required"):
+            return {}
+        contract = self.ontology_contract if isinstance(self.ontology_contract, dict) else {}
+        graph_id = str(self.goal_graph.get("graph_id") or contract.get("goal_graph_id") or "")
+        revision = int(contract.get("revision") or 0)
+        if not graph_id or revision < 1:
+            raise RuntimeError("ontology ledger promotion requires goal_graph_id and contract revision")
+        existing = self.store.get_latest_ontology_ledger(
+            mission_id,
+            goal_graph_id=graph_id,
+            revision=revision,
+        )
+        if existing is not None:
+            if existing.get("execution_contract") != contract:
+                raise RuntimeError("ontology ledger revision already exists with a different execution contract")
+            return existing
+        contract_artifacts = [
+            row
+            for row in self.store.inspect(mission_id).get("artifacts") or []
+            if str(row.get("kind") or "") == "ontology_execution_contract"
+        ]
+        source_artifact_id = str(contract_artifacts[-1].get("artifact_id") or "") if contract_artifacts else ""
+        queen_handoff = self._queen_handoff_quality(context or [])
+        ledger = promote_execution_contract_to_ledger(
+            contract,
+            mission_id=mission_id,
+            revision=revision,
+            source_artifact_id=source_artifact_id,
+            observed_receipt=self.opencrab_receipt,
+            queen_handoff=queen_handoff,
+            promoted_at=utc_now(),
+        )
+        persisted = self.store.persist_ontology_ledger(
+            mission_id,
+            ledger,
+            task_id=task_id,
+        )
+        readback = persisted.get("readback") if isinstance(persisted, dict) else None
+        if not isinstance(readback, dict) or not readback.get("readback", {}).get("validated"):
+            raise RuntimeError("ontology ledger readback validation failed")
+        artifact_id = str(readback.get("_artifact", {}).get("artifact_id") or "")
+        source_uri = "crab://ontology-ledger/%s" % artifact_id
+        if artifact_id and not any(
+            str(row.get("artifact_id") or "") == artifact_id
+            or str(row.get("source_uri") or "") == source_uri
+            for row in self.store.inspect(mission_id).get("evidence") or []
+        ):
+            self.store.add_evidence(
+                EvidenceRef(
+                    evidence_id=new_id("ontology-ledger"),
+                    mission_id=mission_id,
+                    artifact_id=artifact_id,
+                    source_type="local_ontology_ledger",
+                    source_uri=source_uri,
+                    digest=str(readback.get("_artifact", {}).get("sha256") or ""),
+                )
+            )
+        self.store.append_event(
+            mission_id,
+            "ontology_ledger_persisted",
+            Role.QUEEN.value,
+            {
+                "artifact_id": artifact_id,
+                "artifact_kind": ONTOLOGY_LEDGER_KIND,
+                "mission_id": mission_id,
+                "goal_graph_id": graph_id,
+                "revision": revision,
+                "readback_validated": True,
+                "idempotent": bool(persisted.get("idempotent")) if isinstance(persisted, dict) else False,
+            },
+        )
+        return readback
 
     def _refine_retrieval_from_king_plan(self, mission_id: str, task: Dict[str, Any]) -> None:
         """Let a model KING sharpen the next MCP query without adding facts."""
@@ -1079,7 +1164,7 @@ class ColonyExecutor:
                     context.append("SOLDIER receipt: %s" % artifact_id)
                 else:
                     if role is Role.ORACLE:
-                        self._enforce_ontology_contract_gate()
+                        self._enforce_ontology_contract_gate(mission_id)
                     self._enforce_token_gate(mission_id, role, task["task_id"])
                     result = self._run_codex_role(mission_id, task, assignment, objective, context)
                     if role is Role.KING:
@@ -1115,6 +1200,35 @@ class ColonyExecutor:
                     else:
                         context.append("%s:\n%s" % (role.value, result.text[-5000:]))
                 if role is Role.QUEEN and self.goal_plan.get("ontology_required"):
+                    ledger = self._persist_ontology_ledger(
+                        mission_id,
+                        task["task_id"],
+                        context,
+                    )
+                    context.append(
+                        "ONTOLOGY LEDGER READBACK:\n%s"
+                        % json.dumps(
+                            {
+                                "artifact_id": ledger.get("_artifact", {}).get("artifact_id"),
+                                "mission_id": ledger.get("mission_id"),
+                                "goal_graph_id": ledger.get("goal_graph_id"),
+                                "revision": ledger.get("revision"),
+                                "validated": ledger.get("readback", {}).get("validated"),
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                    self._record_kinetic_transition(
+                        mission_id,
+                        task,
+                        ["persist_ontology_ledger"],
+                        "completed",
+                        detail={
+                            "artifact_id": ledger.get("_artifact", {}).get("artifact_id"),
+                            "revision": ledger.get("revision"),
+                            "readback_validated": ledger.get("readback", {}).get("validated"),
+                        },
+                    )
                     decision_gate = str(self.ontology_contract.get("decision_gate") or "blocked")
                     self._record_kinetic_transition(
                         mission_id,
@@ -1307,10 +1421,24 @@ class ColonyExecutor:
             "token budget exhausted before %s: %s/%s %s" % (role.value, spent, limit, basis)
         )
 
-    def _enforce_ontology_contract_gate(self) -> None:
+    def _enforce_ontology_contract_gate(self, mission_id: str = "") -> None:
         """Refuse final synthesis when the goal's required slots are empty."""
         if not self.goal_plan.get("ontology_required"):
             return
+        if mission_id:
+            ledger = self.store.get_latest_ontology_ledger(
+                mission_id,
+                goal_graph_id=str(self.goal_graph.get("graph_id") or ""),
+                revision=int(self.ontology_contract.get("revision") or 0) or None,
+            )
+            if ledger is None or not ledger.get("readback", {}).get("validated"):
+                raise RuntimeError(
+                    "Oracle ontology gate rejected: persisted/readback ontology ledger missing"
+                )
+            if ledger.get("execution_contract") != self.ontology_contract:
+                raise RuntimeError(
+                    "Oracle ontology gate rejected: persisted ontology ledger does not match execution contract"
+                )
         coverage = self.ontology_contract.get("coverage") if isinstance(self.ontology_contract.get("coverage"), dict) else {}
         coverage_gate = str(coverage.get("gate") or "blocked")
         decision_gate = str(self.ontology_contract.get("decision_gate") or "blocked")
@@ -1662,8 +1790,18 @@ class ColonyExecutor:
                 ]
                 ledger_artifacts = [
                     row for row in mission_snapshot.get("artifacts") or []
-                    if str(row.get("kind") or "") == "ontology_ledger"
+                    if str(row.get("kind") or "") == ONTOLOGY_LEDGER_KIND
                 ]
+                ledger_readback = self.store.get_latest_ontology_ledger(
+                    mission_id,
+                    goal_graph_id=str(self.goal_graph.get("graph_id") or ""),
+                    revision=int(self.ontology_contract.get("revision") or 0) or None,
+                )
+                ledger_ok = bool(
+                    ledger_readback
+                    and ledger_readback.get("readback", {}).get("validated")
+                    and ledger_readback.get("execution_contract") == self.ontology_contract
+                )
                 subgoal_task_ids = {
                     str(row.get("task_id") or "")
                     for row in mission_snapshot.get("tasks") or []
@@ -1729,7 +1867,7 @@ class ColonyExecutor:
                     context_observation_ok
                     and queen_artifacts
                     and mcp_receipts
-                    and ledger_artifacts
+                    and ledger_ok
                     and goal_graph_ok
                     and soldier_ok
                     and graph_ok
@@ -1749,6 +1887,13 @@ class ColonyExecutor:
                     "queen_artifact_count": len(queen_artifacts),
                     "mcp_receipt_count": len(mcp_receipts),
                     "ontology_ledger_count": len(ledger_artifacts),
+                    "ontology_ledger_readback": {
+                        "validated": ledger_ok,
+                        "artifact_id": (ledger_readback or {}).get("_artifact", {}).get("artifact_id"),
+                        "mission_id": (ledger_readback or {}).get("mission_id"),
+                        "goal_graph_id": (ledger_readback or {}).get("goal_graph_id"),
+                        "revision": (ledger_readback or {}).get("revision"),
+                    },
                     "king_subgoal_count": len(subgoal_task_ids),
                     "king_subgoal_artifact_count": len(subgoal_artifacts),
                     "king_subgoal_receipt_count": len(subgoal_receipts),
@@ -2642,12 +2787,19 @@ class ColonyExecutor:
                 if self.goal_plan.get("ontology_required") and not self.opencrab_receipt.get("evidence_count") and not metadata_only_lookup:
                     raise RuntimeError("Oracle ontology gate rejected: no observed OpenCrab evidence")
                 if self.goal_plan.get("ontology_required"):
-                    ledger_exists = any(
-                        str(row.get("kind") or "") == "ontology_ledger"
-                        for row in self.store.inspect(mission_id).get("artifacts") or []
+                    ledger_readback = self.store.get_latest_ontology_ledger(
+                        mission_id,
+                        goal_graph_id=str(self.goal_graph.get("graph_id") or ""),
+                        revision=int(self.ontology_contract.get("revision") or 0) or None,
                     )
-                    if not ledger_exists:
-                        raise RuntimeError("Oracle ontology gate rejected: no ontology ledger")
+                    if (
+                        ledger_readback is None
+                        or not ledger_readback.get("readback", {}).get("validated")
+                        or ledger_readback.get("execution_contract") != self.ontology_contract
+                    ):
+                        raise RuntimeError(
+                            "Oracle ontology gate rejected: persisted/readback ontology ledger mismatch"
+                        )
                     mission_snapshot = self.store.inspect(mission_id)
                     subgoal_task_ids = {
                         str(row.get("task_id") or "")
@@ -2701,6 +2853,20 @@ class ColonyExecutor:
         contract_coverage = self.ontology_contract.get("coverage") if isinstance(self.ontology_contract.get("coverage"), dict) else {}
         contract_gate = str(contract_coverage.get("gate") or "not_required")
         decision_gate = str(self.ontology_contract.get("decision_gate") or "not_required")
+        ledger_readback = (
+            self.store.get_latest_ontology_ledger(
+                mission_id,
+                goal_graph_id=str(self.goal_graph.get("graph_id") or ""),
+                revision=int(self.ontology_contract.get("revision") or 0) or None,
+            )
+            if self.goal_plan.get("ontology_required")
+            else None
+        )
+        ledger_ok = bool(
+            ledger_readback
+            and ledger_readback.get("readback", {}).get("validated")
+            and ledger_readback.get("execution_contract") == self.ontology_contract
+        )
         repair = {"attempted": False, "reason": "not_needed"}
         if (
             self.goal_plan.get("ontology_required")
@@ -2715,6 +2881,20 @@ class ColonyExecutor:
             contract_coverage = self.ontology_contract.get("coverage") if isinstance(self.ontology_contract.get("coverage"), dict) else {}
             contract_gate = str(contract_coverage.get("gate") or "not_required")
             decision_gate = str(self.ontology_contract.get("decision_gate") or "not_required")
+            if repair.get("attempted"):
+                # A bounded Queen repair creates a new execution-contract
+                # revision; promote that revision before Soldier can hand off
+                # to ORACLE.
+                ledger_readback = self._persist_ontology_ledger(
+                    mission_id,
+                    task["task_id"],
+                    context,
+                )
+                ledger_ok = bool(
+                    ledger_readback
+                    and ledger_readback.get("readback", {}).get("validated")
+                    and ledger_readback.get("execution_contract") == self.ontology_contract
+                )
         judge_checks = [
             {
                 "check": "authoritative_evidence",
@@ -2737,6 +2917,11 @@ class ColonyExecutor:
                     else True
                 ),
                 "reason": "required evidence slots and decision slots are explicitly covered",
+            },
+            {
+                "check": "ontology_ledger_readback",
+                "passed": ledger_ok if self.goal_plan.get("ontology_required") else True,
+                "reason": "QUEEN promotion is persisted and validated from the artifact path",
             },
             {
                 "check": "next_action",
@@ -2770,6 +2955,8 @@ class ColonyExecutor:
             stop_reasons.append("ontology_slot_coverage_blocked")
         if self.goal_plan.get("ontology_required") and decision_gate != "pass":
             stop_reasons.append("decision_slot_gate_blocked")
+        if self.goal_plan.get("ontology_required") and not ledger_ok:
+            stop_reasons.append("ontology_ledger_readback_blocked")
         if self.goal_plan.get("action_required") and not queen_handoff_quality.get("actionable_next_action"):
             stop_reasons.append("goal_actionability_gate_blocked")
         if not all(bool(item["passed"]) for item in judge_checks):
@@ -2791,6 +2978,14 @@ class ColonyExecutor:
                 "filled_required_slot_count": contract_coverage.get("filled_required_slot_count", 0),
                 "required_slot_count": contract_coverage.get("required_slot_count", 0),
             },
+            "ontology_ledger": {
+                "artifact_kind": ONTOLOGY_LEDGER_KIND,
+                "artifact_id": (ledger_readback or {}).get("_artifact", {}).get("artifact_id"),
+                "mission_id": (ledger_readback or {}).get("mission_id"),
+                "goal_graph_id": (ledger_readback or {}).get("goal_graph_id"),
+                "revision": (ledger_readback or {}).get("revision"),
+                "readback_validated": ledger_ok,
+            },
             "context_quality": context_quality,
             "queen_handoff_quality": queen_handoff_quality,
             "automatic_revision": repair,
@@ -2802,53 +2997,9 @@ class ColonyExecutor:
             "reason": "local receipts and claim gate were healthy" if not stop_reasons else "local patrol found a stop condition",
         }
         if self.goal_plan.get("ontology_required"):
-            evidence_rows = self.opencrab_receipt.get("evidence") if isinstance(self.opencrab_receipt.get("evidence"), list) else []
-            paths = self.opencrab_receipt.get("paths") if isinstance(self.opencrab_receipt.get("paths"), list) else []
-            ledger = {
-                "schema": "crab.ontology-ledger/v1",
-                "authority": "direct_mcp_response",
-                "objective": self.goal_plan.get("objective"),
-                "route": self.opencrab_receipt.get("route") or self.goal_plan.get("retrieval_contract") or {},
-                "quality": context_quality,
-                "claim_gate": claim_gate,
-                "observation_gate": self.opencrab_receipt.get("observation_gate", "not_required"),
-                "observed_items": (self.opencrab_receipt.get("observed_items") or [])[:24],
-                "graph_gate": graph_gate,
-                "evidence": [
-                    {
-                        "id": row.get("id"),
-                        "source": row.get("source"),
-                        "text": str(row.get("text") or "")[:360],
-                    }
-                    for row in evidence_rows[:8]
-                    if isinstance(row, dict)
-                ],
-                "paths": paths[:12],
-                "queen_handoff": queen_handoff_quality,
-                "automatic_revision": repair,
-                "judge_checks": judge_checks,
-                "queen_next_action": queen_handoff_quality.get("next_action", ""),
-                "decision": decision,
-                "next_action": "oracle_review" if decision == "continue" else "stop_and_request_authoritative_context",
-            }
-            ledger_artifact = self.service._write_artifact(
-                mission_id,
-                task["task_id"],
-                "ontology_ledger.json",
-                json.dumps(ledger, ensure_ascii=False, indent=2) + "\n",
-                "ontology_ledger",
+            report["ontology_ledger_artifact_id"] = (
+                (ledger_readback or {}).get("_artifact", {}).get("artifact_id")
             )
-            self.store.add_evidence(
-                EvidenceRef(
-                    evidence_id=new_id("ontology-ledger"),
-                    mission_id=mission_id,
-                    artifact_id=ledger_artifact.artifact_id,
-                    source_type="local_ontology_ledger",
-                    source_uri="crab://ontology-ledger/%s" % ledger_artifact.artifact_id,
-                    digest=ledger_artifact.sha256,
-                )
-            )
-            report["ontology_ledger_artifact_id"] = ledger_artifact.artifact_id
         artifact = self.service._write_artifact(mission_id, task["task_id"], task["output_contract"], json.dumps(report, ensure_ascii=False, indent=2) + "\n", "soldier_patrol")
         self.store.add_tool_receipt(mission_id, task["task_id"], attempt["attempt_id"], "crab.soldier.local_patrol", "success", {**report, "artifact_id": artifact.artifact_id})
         if decision == "stop":

@@ -162,6 +162,8 @@ class RuntimeService:
                 ontology_contract = compile_ontology_execution_contract(
                     goal_plan_payload,
                     goal_graph,
+                    mission_id=mission_id,
+                    revision=1,
                 )
                 self._write_artifact(
                     mission_id=mission_id,

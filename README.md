@@ -167,10 +167,13 @@ billable input estimate. A lower total-token result is labelled
 `cache_sensitive` when the direct path received a larger provider prompt-cache
 hit; KINGCRAB does not turn that observation into a cost-saving claim.
 
-Soldier also writes an `ontology_ledger` containing the usable evidence,
-bounded graph paths, quality gate and next action. Successful evidence
-contexts are reused through a short-lived local cache; failures and empty
-results are never cached.
+At the end of QUEEN, the runtime promotes the current
+`ontology_execution_contract` into one identity-bound `ontology_ledger`
+revision. The ledger is persisted with `artifact kind`, `mission_id`,
+`goal_graph_id` and `revision`, then read back and hash-validated. SOLDIER
+and ORACLE consume that persisted ledger; they do not synthesize a replacement
+from in-memory state. Successful evidence contexts are reused through a
+short-lived local cache; failures and empty results are never cached.
 
 When authoritative context is empty or the graph gate is blocked, the runtime
 does not spend a Queen/Oracle model turn on a guess. It persists an
