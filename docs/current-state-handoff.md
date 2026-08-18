@@ -164,4 +164,13 @@ event log remains at
 5. Add crash-resume/true queued worker scheduling, direct child mission links,
    mobile event cursors and device revocation.
 
-No OpenCrab ingest or deployment was performed while closing this slice.
+The ontology-ledger runtime rollout was completed on 2026-08-18 through the
+canonical remote release path. Runtime release
+`0.7.8-20260818-ontology-ledger-1` is active on `myserver-root` with source
+commit `28392192c37cbb787e7702484ae4538cdb371e42` and wheel SHA-256
+`d37993d95cc575517a44005bd31b3f768daacb163d94cae2243b252a18a97162`.
+The deployment `ping`/`mission.list` canaries, gateway `/readyz`, public OAuth
+metadata and unauthenticated 401 boundary passed. The authenticated public
+`tools/list` canary remains pending in this shell because
+`KINGCRAB_OAUTH_LOGIN_SECRET` was unavailable. No OpenCrab ingest was
+performed.
