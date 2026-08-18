@@ -170,7 +170,7 @@ canonical remote release path. Runtime release
 commit `28392192c37cbb787e7702484ae4538cdb371e42` and wheel SHA-256
 `d37993d95cc575517a44005bd31b3f768daacb163d94cae2243b252a18a97162`.
 The deployment `ping`/`mission.list` canaries, gateway `/readyz`, public OAuth
-metadata and unauthenticated 401 boundary passed. The authenticated public
-`tools/list` canary remains pending in this shell because
-`KINGCRAB_OAUTH_LOGIN_SECRET` was unavailable. No OpenCrab ingest was
-performed.
+metadata, unauthenticated 401 boundary and authenticated public OAuth
+`tools/list` canary passed. The authenticated verifier observed 13 tools,
+`query_status=ok`, the read-scope action boundary, and the execution contract,
+update and receipt schemas. No OpenCrab ingest was performed.
