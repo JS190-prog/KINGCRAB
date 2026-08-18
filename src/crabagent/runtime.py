@@ -106,6 +106,11 @@ class RuntimeService:
                 output_contract=output_contract,
                 status=TaskStatus.PENDING,
                 depends_on=list(previous[-1:]),
+                write_scope=(
+                    "task_contract_only"
+                    if role is Role.WORKER and goal_plan is not None and goal_plan.requires_write
+                    else "none"
+                ),
             )
             self.store.add_task(task)
             route_kind = "ontology_judgment" if role is Role.SOLDIER else (

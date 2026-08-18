@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .opencrab import opencrab_error_details
 from .ontology_route import compile_ontology_route
 
 
@@ -234,6 +235,8 @@ def _payload_status(payload: Any) -> str:
     explicit = str(payload.get("status") or "").strip().lower()
     if explicit:
         return explicit
+    if payload.get("error"):
+        return "error"
     if any(
         key in payload
         for key in (
@@ -287,6 +290,17 @@ def _merge_query_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     merged["batch_count"] = len(payloads)
     merged["successful_batch_count"] = len(successful)
     merged["failed_batch_count"] = len(payloads) - len(successful)
+    failures = [payload for payload in payloads if _payload_status(payload) not in {"ok", "no_evidence", "cached"}]
+    if failures:
+        details = opencrab_error_details(failures[0], default_stage="opencrab_query")
+        merged.setdefault("error", details["message"])
+        merged.setdefault("error_code", details["error_code"])
+        merged.setdefault("error_stage", details["stage"])
+        merged.setdefault("request_id", details["request_id"])
+        merged["retryable"] = any(
+            bool(opencrab_error_details(payload, default_stage="opencrab_query").get("retryable"))
+            for payload in failures
+        )
     return merged
 
 
@@ -822,6 +836,11 @@ class OntologyContextCollector:
             "query": objective,
             "arguments": query_arguments,
             "status": query_status,
+            "error": query_payload.get("error"),
+            "error_code": query_payload.get("error_code"),
+            "error_stage": query_payload.get("error_stage"),
+            "request_id": query_payload.get("request_id"),
+            "retryable": bool(query_payload.get("retryable")),
             "observed_at": None,
             "route": route,
             "evidence": evidence,
@@ -965,11 +984,59 @@ class OntologyContextCollector:
             payload = self.call_tool(name, arguments)
             status = self._status(payload)
             call_status = "observed" if status in {"ok", "no_evidence"} else "failed"
-            calls.append({"tool": name, "arguments": arguments, "status": call_status, "response_status": status})
-            return payload if isinstance(payload, dict) else {"status": "error", "error": "invalid MCP payload"}
+            if isinstance(payload, dict):
+                normalized = dict(payload)
+            else:
+                normalized = {"status": "error", "error": "invalid MCP payload"}
+                status = "error"
+                call_status = "failed"
+            details = opencrab_error_details(normalized, default_stage="tool:%s" % name)
+            call = {
+                "tool": name,
+                "arguments": arguments,
+                "status": call_status,
+                "response_status": status,
+            }
+            if call_status == "failed":
+                normalized.setdefault("error", details["message"])
+                normalized.setdefault("error_code", details["error_code"])
+                normalized.setdefault("error_stage", details["stage"])
+                normalized.setdefault("request_id", details["request_id"])
+                normalized.setdefault("retryable", details["retryable"])
+                call.update(
+                    {
+                        "error": details["message"],
+                        "error_code": details["error_code"],
+                        "stage": details["stage"],
+                        "request_id": details["request_id"],
+                        "retryable": details["retryable"],
+                    }
+                )
+            calls.append(call)
+            return normalized
         except Exception as exc:
-            calls.append({"tool": name, "arguments": arguments, "status": "failed", "error_type": type(exc).__name__})
-            return {"status": "error", "error": str(exc)}
+            details = opencrab_error_details(exc, default_stage="tool:%s" % name)
+            calls.append(
+                {
+                    "tool": name,
+                    "arguments": arguments,
+                    "status": "failed",
+                    "error": details["message"],
+                    "error_code": details["error_code"],
+                    "stage": details["stage"],
+                    "request_id": details["request_id"],
+                    "retryable": details["retryable"],
+                    "error_type": type(exc).__name__,
+                }
+            )
+            return {
+                "status": "error",
+                "error": details["message"],
+                "error_code": details["error_code"],
+                "error_stage": details["stage"],
+                "request_id": details["request_id"],
+                "retryable": details["retryable"],
+            }
 
     @staticmethod
     def _status(payload: Any) -> str:

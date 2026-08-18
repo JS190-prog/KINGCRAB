@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import re
+import socket
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,8 +18,106 @@ from . import __version__
 from .discovery import mcp_inventory
 
 
+_OPENCRAB_TRANSIENT_ERROR_CODES = frozenset(
+    {
+        "OPENCRAB_MCP_TIMEOUT",
+        "OPENCRAB_MCP_CONNECTION_RESET",
+        "OPENCRAB_MCP_TRANSPORT_ERROR",
+        "OPENCRAB_HTTP_ERROR",
+        "OPENCRAB_EMPTY_RESULT",
+    }
+)
+
+
+def _safe_error_message(value: Any) -> str:
+    """Keep diagnostics useful without returning endpoint query secrets."""
+    message = " ".join(str(value or "").split())
+    message = re.sub(r"https?://\S+", "<redacted-url>", message, flags=re.IGNORECASE)
+    return message[:500]
+
+
+def _normalise_error_code(value: Any, default: str) -> str:
+    candidate = re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "").strip())[:96]
+    return candidate or default
+
+
 class OpenCrabUnavailable(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "OPENCRAB_UNAVAILABLE",
+        stage: str = "transport",
+        request_id: str = "",
+        retryable: Optional[bool] = None,
+        status_code: Optional[int] = None,
+    ) -> None:
+        super().__init__(_safe_error_message(message))
+        self.error_code = _normalise_error_code(error_code, "OPENCRAB_UNAVAILABLE")
+        self.stage = _safe_error_message(stage) or "transport"
+        self.request_id = _safe_error_message(request_id)
+        self.status_code = int(status_code) if isinstance(status_code, int) else None
+        self.retryable = (
+            self.error_code in _OPENCRAB_TRANSIENT_ERROR_CODES
+            if retryable is None
+            else bool(retryable)
+        )
+
+
+def opencrab_error_details(
+    value: Any,
+    *,
+    default_stage: str = "context_collection",
+    request_id: str = "",
+) -> Dict[str, Any]:
+    """Return a credential-free, structured MCP failure projection."""
+    if isinstance(value, OpenCrabUnavailable):
+        return {
+            "error_code": value.error_code,
+            "message": _safe_error_message(value),
+            "stage": value.stage or default_stage,
+            "request_id": value.request_id or _safe_error_message(request_id),
+            "retryable": bool(value.retryable),
+            "status_code": value.status_code,
+        }
+
+    payload = value if isinstance(value, dict) else {}
+    nested = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    message = nested.get("message") if nested else payload.get("error")
+    if not message and not isinstance(value, dict):
+        message = value
+    message = _safe_error_message(message or "OpenCrab MCP context failed")
+    code = _normalise_error_code(
+        nested.get("code") or payload.get("error_code"),
+        "OPENCRAB_CONTEXT_ERROR",
+    )
+    stage = _safe_error_message(
+        nested.get("stage") or payload.get("error_stage") or payload.get("stage") or default_stage
+    )
+    observed_request_id = _safe_error_message(
+        nested.get("request_id") or payload.get("request_id") or request_id
+    )
+    status_code = nested.get("status_code") or payload.get("status_code")
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+    retryable = nested.get("retryable") if nested else payload.get("retryable")
+    if retryable is None:
+        retryable = code in _OPENCRAB_TRANSIENT_ERROR_CODES
+        lowered = message.lower()
+        if any(token in lowered for token in ("timeout", "timed out", "connection reset", "temporarily unavailable")):
+            retryable = True
+            if code == "OPENCRAB_CONTEXT_ERROR":
+                code = "OPENCRAB_MCP_TIMEOUT" if "timeout" in lowered or "timed out" in lowered else "OPENCRAB_MCP_CONNECTION_RESET"
+    return {
+        "error_code": code,
+        "message": message,
+        "stage": stage or default_stage,
+        "request_id": observed_request_id,
+        "retryable": bool(retryable),
+        "status_code": status_code,
+    }
 
 
 _MCP_SECTION = re.compile(r'^\s*\[\s*mcp_servers\.(?:"(?P<quoted>[^"]+)"|(?P<bare>[^\]\s]+))\s*\]\s*$')
@@ -308,7 +407,7 @@ def resolve_opencrab_package_scope(
     return base
 
 
-def _decode_mcp_payload(raw: bytes) -> Dict[str, Any]:
+def _decode_mcp_payload(raw: bytes, *, request_id: str = "", stage: str = "mcp_response") -> Dict[str, Any]:
     text = raw.decode("utf-8", errors="replace").strip()
     if text.startswith("data:") or "\ndata:" in text:
         chunks = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
@@ -316,15 +415,47 @@ def _decode_mcp_payload(raw: bytes) -> Dict[str, Any]:
     try:
         payload = json.loads(text)
     except ValueError as exc:
-        raise OpenCrabUnavailable("OpenCrab MCP returned an unreadable response") from exc
+        raise OpenCrabUnavailable(
+            "OpenCrab MCP returned an unreadable response",
+            error_code="OPENCRAB_INVALID_RESPONSE",
+            stage=stage,
+            request_id=request_id,
+            retryable=False,
+        ) from exc
     if not isinstance(payload, dict):
-        raise OpenCrabUnavailable("OpenCrab MCP returned an invalid response")
+        raise OpenCrabUnavailable(
+            "OpenCrab MCP returned an invalid response",
+            error_code="OPENCRAB_INVALID_RESPONSE",
+            stage=stage,
+            request_id=request_id,
+            retryable=False,
+        )
     if payload.get("error"):
         error = payload["error"]
-        raise OpenCrabUnavailable(str(error.get("message") if isinstance(error, dict) else error))
+        if isinstance(error, dict):
+            message = error.get("message") or "OpenCrab MCP returned an MCP error"
+            code = error.get("code") or "OPENCRAB_MCP_ERROR"
+            retryable = error.get("retryable")
+        else:
+            message = error
+            code = "OPENCRAB_MCP_ERROR"
+            retryable = None
+        raise OpenCrabUnavailable(
+            str(message),
+            error_code=_normalise_error_code(code, "OPENCRAB_MCP_ERROR"),
+            stage=stage,
+            request_id=request_id,
+            retryable=retryable,
+        )
     result = payload.get("result")
     if not isinstance(result, dict):
-        raise OpenCrabUnavailable("OpenCrab MCP returned no result")
+        raise OpenCrabUnavailable(
+            "OpenCrab MCP returned no result",
+            error_code="OPENCRAB_EMPTY_RESULT",
+            stage=stage,
+            request_id=request_id,
+            retryable=True,
+        )
     return result
 
 
@@ -340,9 +471,10 @@ class OpenCrabMcpClient:
         self.endpoint = endpoint
         self.opener = opener
         self.session_id = ""
+        self.last_request_id = ""
 
     @staticmethod
-    def _read_json_message(response: Any) -> bytes:
+    def _read_json_message(response: Any, *, request_id: str = "", stage: str = "mcp_response") -> bytes:
         decoder = json.JSONDecoder()
         buffer = bytearray()
         while len(buffer) <= 8 * 1024 * 1024:
@@ -360,10 +492,18 @@ class OpenCrabMcpClient:
             except ValueError:
                 continue
             return text[:end].encode("utf-8")
-        raise OpenCrabUnavailable("OpenCrab MCP returned no complete JSON-RPC message")
+        raise OpenCrabUnavailable(
+            "OpenCrab MCP returned no complete JSON-RPC message",
+            error_code="OPENCRAB_EMPTY_RESULT",
+            stage=stage,
+            request_id=request_id,
+            retryable=True,
+        )
 
     def _post(self, method: str, params: Dict[str, Any], *, expect_result: bool = True) -> Dict[str, Any]:
         request_id = str(uuid.uuid4())
+        self.last_request_id = request_id
+        stage = "mcp.%s" % method
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
@@ -389,24 +529,55 @@ class OpenCrabMcpClient:
                     chunks.append(line)
                     total += len(line)
                     if total > 8 * 1024 * 1024:
-                        raise OpenCrabUnavailable("OpenCrab MCP event exceeded the local response limit")
+                        raise OpenCrabUnavailable(
+                            "OpenCrab MCP event exceeded the local response limit",
+                            error_code="OPENCRAB_RESPONSE_TOO_LARGE",
+                            stage=stage,
+                            request_id=request_id,
+                            retryable=False,
+                        )
                     if line in {b"\n", b"\r\n"}:
                         break
                 raw = b"".join(chunks)
             else:
-                raw = self._read_json_message(response)
+                raw = self._read_json_message(response, request_id=request_id, stage=stage)
             session_id = response.headers.get("Mcp-Session-Id")
             if session_id:
                 self.session_id = session_id
             close = getattr(response, "close", None)
             if callable(close):
                 close()
-        except (HTTPError, URLError, OSError) as exc:
+        except HTTPError as exc:
+            status_code = int(exc.code) if isinstance(exc.code, int) else None
+            retryable = status_code in {408, 425, 429, 500, 502, 503, 504}
+            raise OpenCrabUnavailable(
+                "OpenCrab MCP request failed",
+                error_code="OPENCRAB_HTTP_ERROR",
+                stage=stage,
+                request_id=request_id,
+                retryable=retryable,
+                status_code=status_code,
+            ) from exc
+        except (URLError, OSError) as exc:
             # urllib errors can embed the full endpoint, including credentials.
             # Keep the concrete exception chained for local debugging without
             # returning it through the daemon or TUI boundary.
-            raise OpenCrabUnavailable("OpenCrab MCP request failed") from exc
-        return _decode_mcp_payload(raw) if expect_result else {}
+            reason = getattr(exc, "reason", exc)
+            reason_text = str(reason).lower()
+            if isinstance(exc, (TimeoutError, socket.timeout)) or "timeout" in reason_text or "timed out" in reason_text:
+                error_code = "OPENCRAB_MCP_TIMEOUT"
+            elif isinstance(exc, ConnectionResetError) or "connection reset" in reason_text or "reset by peer" in reason_text:
+                error_code = "OPENCRAB_MCP_CONNECTION_RESET"
+            else:
+                error_code = "OPENCRAB_MCP_TRANSPORT_ERROR"
+            raise OpenCrabUnavailable(
+                "OpenCrab MCP request failed",
+                error_code=error_code,
+                stage=stage,
+                request_id=request_id,
+                retryable=True,
+            ) from exc
+        return _decode_mcp_payload(raw, request_id=request_id, stage=stage) if expect_result else {}
 
     def initialize(self) -> None:
         self._post(

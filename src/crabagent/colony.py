@@ -31,6 +31,7 @@ from .models import (
 from .opencrab import (
     OpenCrabMcpClient,
     OpenCrabUnavailable,
+    opencrab_error_details,
     opencrab_url,
     resolve_opencrab_package_scope,
 )
@@ -72,16 +73,33 @@ _HOST_WORKER_ARTIFACT_ROOT = ".crabagent/artifacts/"
 _HOST_WORKER_ARTIFACT_MAX_BYTES = 16 * 1024
 _HOST_WORKER_ARTIFACT_SUFFIXES = frozenset({".md", ".txt", ".json"})
 _HOST_WORKER_ARTIFACT_FILENAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+_HOST_WORKER_CODE_FENCE_PREFIXES = ("```", "~~~")
 
 
 def _parse_host_worker_artifact_directive(text: str) -> tuple[str, Optional[Dict[str, Any]]]:
     lines = str(text or "").splitlines()
-    matches = [(index, line[len(_HOST_WORKER_ARTIFACT_PREFIX):]) for index, line in enumerate(lines) if line.startswith(_HOST_WORKER_ARTIFACT_PREFIX)]
+    matches = []
+    for index, line in enumerate(lines):
+        candidate = line.strip()
+        if candidate.startswith(_HOST_WORKER_ARTIFACT_PREFIX):
+            matches.append((index, candidate[len(_HOST_WORKER_ARTIFACT_PREFIX):], False))
+            continue
+        # Models sometimes wrap the required physical line in a one-line
+        # fenced JSON block. Accept only a complete fence whose inner text is
+        # still the directive; prose and Markdown bullets remain invalid.
+        for fence in _HOST_WORKER_CODE_FENCE_PREFIXES:
+            if candidate.startswith(fence) and candidate.endswith(fence) and len(candidate) > len(fence) * 2:
+                inner = candidate[len(fence):-len(fence)].strip()
+                if inner.startswith(_HOST_WORKER_ARTIFACT_PREFIX):
+                    matches.append((index, inner[len(_HOST_WORKER_ARTIFACT_PREFIX):], True))
+                    break
+        else:
+            continue
     if not matches:
         return str(text or "").strip(), None
     if len(matches) != 1:
         raise ValueError("HOST_WORKER_ARTIFACT_V1 requires exactly one directive line")
-    index, raw_payload = matches[0]
+    index, raw_payload, one_line_fence = matches[0]
     try:
         payload = json.loads(raw_payload)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -110,7 +128,18 @@ def _parse_host_worker_artifact_directive(text: str) -> tuple[str, Optional[Dict
     encoded = artifact_content.encode("utf-8")
     if len(encoded) > _HOST_WORKER_ARTIFACT_MAX_BYTES:
         raise ValueError("HOST_WORKER_ARTIFACT_V1 content exceeds 16 KiB")
-    cleaned = "\n".join(lines[:index] + lines[index + 1:]).strip()
+    remove_indices = {index}
+    if not one_line_fence:
+        # Remove only fence delimiters directly enclosing the directive so a
+        # Korean explanation or verification text remains available as the
+        # role result after artifact creation.
+        before = index - 1
+        after = index + 1
+        if before >= 0 and lines[before].strip().startswith(_HOST_WORKER_CODE_FENCE_PREFIXES):
+            remove_indices.add(before)
+        if after < len(lines) and lines[after].strip().startswith(_HOST_WORKER_CODE_FENCE_PREFIXES):
+            remove_indices.add(after)
+    cleaned = "\n".join(line for line_index, line in enumerate(lines) if line_index not in remove_indices).strip()
     if not cleaned:
         cleaned = "Bounded host-worker artifact prepared."
     return cleaned, {
@@ -119,6 +148,20 @@ def _parse_host_worker_artifact_directive(text: str) -> tuple[str, Optional[Dict
         "bytes": len(encoded),
         "sha256": hashlib.sha256(encoded).hexdigest(),
     }
+
+
+def _opencrab_retry_details(receipt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return one transient context failure, never retry a successful receipt."""
+    if not isinstance(receipt, dict) or str(receipt.get("status") or "").lower() in {"ok", "cached", "no_evidence"}:
+        return None
+    calls = receipt.get("tool_calls") if isinstance(receipt.get("tool_calls"), list) else []
+    candidates = [row for row in calls if isinstance(row, dict) and str(row.get("status") or "") == "failed"]
+    candidates.append(receipt)
+    for candidate in candidates:
+        details = opencrab_error_details(candidate, default_stage="context_collection")
+        if details.get("retryable"):
+            return details
+    return None
 
 
 def _usage_total(usage: Dict[str, Any]) -> Optional[int]:
@@ -2073,12 +2116,19 @@ class ColonyExecutor:
             nonlocal client
             if name == "opencrab_query" and self.opencrab_context_loader is not None:
                 return self.opencrab_context_loader(arguments)
+            if name == "opencrab_status" and self.opencrab_context_loader is not None:
+                # Test/local loaders may implement the canary without
+                # opening a second live connection. The marker is outside the
+                # normal query contract and is never sent to OpenCrab SaaS.
+                return self.opencrab_context_loader({"__kingcrab_tool__": "opencrab_status", **arguments})
             if client is None:
                 client = OpenCrabMcpClient(opencrab_url(workspace=self.service.workspace))
             return client.call_tool(name, arguments)
 
-        try:
-            retrieval_contract = self.goal_plan.get("retrieval_contract") or {}
+        retrieval_contract = self.goal_plan.get("retrieval_contract") or {}
+
+        def collect_once() -> Dict[str, Any]:
+            nonlocal package_ids, scope_resolution
             # Selected packs are already an explicit user dependency. With
             # no selection, Queen first resolves a bounded metadata scope so
             # the evidence query is not forced to search the entire account.
@@ -2096,7 +2146,7 @@ class ColonyExecutor:
                     for value in (scope_resolution.get("selected_package_ids") or [])
                     if str(value).strip()
                 ]
-            receipt = OntologyContextCollector(
+            return OntologyContextCollector(
                 call_tool,
                 cache_path=self.service.workspace / ".crabagent" / "opencrab" / "ontology-context-cache.json",
             ).collect(
@@ -2106,14 +2156,20 @@ class ColonyExecutor:
                 retrieval_contract=retrieval_contract or None,
                 scope_resolution=scope_resolution,
             )
-        except (OpenCrabUnavailable, OSError, RuntimeError, ValueError) as exc:
-            receipt = {
+
+        def error_receipt(exc: Exception, stage: str) -> Dict[str, Any]:
+            details = opencrab_error_details(exc, default_stage=stage)
+            return {
                 "schema": "crab.opencrab-context-receipt/v2",
                 "source": "OpenCrab MCP",
                 "authority": "direct_mcp_response",
                 "query": objective,
                 "status": "error",
-                "error": str(exc),
+                "error": details["message"],
+                "error_code": details["error_code"],
+                "error_stage": details["stage"],
+                "request_id": details["request_id"],
+                "retryable": details["retryable"],
                 "evidence": [],
                 "evidence_count": 0,
                 "nodes": [],
@@ -2123,6 +2179,157 @@ class ColonyExecutor:
                 "tool_calls": [],
                 "claim_gate": "blocked",
             }
+
+        def context_attempt_summary(attempt_number: int, value: Dict[str, Any]) -> Dict[str, Any]:
+            status = str(value.get("status") or "unknown").lower()
+            details = opencrab_error_details(value, default_stage="context_collection")
+            return {
+                "attempt": attempt_number,
+                "status": status,
+                "error_code": value.get("error_code") if status not in {"ok", "cached", "no_evidence"} else None,
+                "error_stage": value.get("error_stage") if status not in {"ok", "cached", "no_evidence"} else None,
+                "request_id": value.get("request_id") if status not in {"ok", "cached", "no_evidence"} else None,
+                "retryable": bool(details.get("retryable")) if status not in {"ok", "cached", "no_evidence"} else False,
+            }
+
+        def run_canary() -> Dict[str, Any]:
+            nonlocal client
+            # A failed session may carry a stale MCP session id. Recreate the
+            # read-only client before canary and retry; never reuse a failed
+            # transport session blindly.
+            client = None
+            try:
+                payload = call_tool("opencrab_status", {})
+            except (OpenCrabUnavailable, OSError, RuntimeError, ValueError) as exc:
+                details = opencrab_error_details(exc, default_stage="connection_canary")
+                return {**details, "status": "error", "scope_revalidated": False}
+            if not isinstance(payload, dict):
+                details = opencrab_error_details(payload, default_stage="connection_canary")
+                return {**details, "status": "error", "scope_revalidated": False}
+            status = str(payload.get("status") or "").lower()
+            request_id = str(payload.get("request_id") or getattr(client, "last_request_id", "") or "")
+            if status not in {"ok", "cached", "success"}:
+                details = opencrab_error_details(payload, default_stage="connection_canary", request_id=request_id)
+                return {**details, "status": "error", "scope_revalidated": False}
+            expected_workspace = str(
+                self.ontology_context.get("workspace_id")
+                or self.ontology_context.get("workspace")
+                or ""
+            ).strip()
+            reported_scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else payload
+            reported_workspace = str(reported_scope.get("workspace_id") or "").strip()
+            if expected_workspace and reported_workspace and expected_workspace != reported_workspace:
+                return {
+                    "error_code": "OPENCRAB_WORKSPACE_MISMATCH",
+                    "message": "OpenCrab canary workspace does not match the mission scope",
+                    "stage": "connection_canary",
+                    "request_id": request_id,
+                    "retryable": False,
+                    "status": "error",
+                    "scope_revalidated": False,
+                }
+            expected_projects = {
+                str(value).strip()
+                for value in self.ontology_context.get("project_ids") or []
+                if str(value).strip()
+            }
+            reported_projects = {
+                str(value).strip()
+                for value in reported_scope.get("project_ids") or []
+                if str(value).strip()
+            }
+            if expected_projects and reported_projects and expected_projects != reported_projects:
+                return {
+                    "error_code": "OPENCRAB_PROJECT_SCOPE_MISMATCH",
+                    "message": "OpenCrab canary project scope does not match the mission scope",
+                    "stage": "connection_canary",
+                    "request_id": request_id,
+                    "retryable": False,
+                    "status": "error",
+                    "scope_revalidated": False,
+                }
+            return {
+                "status": "ok",
+                "error_code": None,
+                "message": "OpenCrab read-only canary passed",
+                "stage": "connection_canary",
+                "request_id": request_id,
+                "retryable": False,
+                "scope_revalidated": True,
+                "profile_revalidated": True,
+                "selected_package_count": len(package_ids),
+                "selected_project_count": len(expected_projects),
+            }
+
+        try:
+            receipt = collect_once()
+        except (OpenCrabUnavailable, OSError, RuntimeError, ValueError) as exc:
+            receipt = error_receipt(exc, "context_collection")
+
+        attempts = [context_attempt_summary(1, receipt)]
+        retry = {
+            "policy": "read_only_bounded_once",
+            "max_attempts": 2,
+            "attempt_count": 1,
+            "eligible": False,
+            "retried": False,
+            "canary": None,
+        }
+        initial_failure = _opencrab_retry_details(receipt)
+        if initial_failure:
+            retry["eligible"] = True
+            retry["initial_error"] = dict(initial_failure)
+            retry["initial_tool_calls"] = [
+                dict(row)
+                for row in (receipt.get("tool_calls") or [])
+                if isinstance(row, dict)
+            ]
+            canary = run_canary()
+            retry["canary"] = {
+                key: canary.get(key)
+                for key in (
+                    "status",
+                    "error_code",
+                    "message",
+                    "stage",
+                    "request_id",
+                    "retryable",
+                    "scope_revalidated",
+                    "profile_revalidated",
+                    "selected_package_count",
+                    "selected_project_count",
+                )
+                if canary.get(key) is not None
+            }
+            canary_call = {
+                "tool": "opencrab_status",
+                "arguments": {},
+                "status": "observed" if canary.get("status") == "ok" else "failed",
+                "response_status": canary.get("status"),
+                "error_code": canary.get("error_code"),
+                "stage": canary.get("stage"),
+                "request_id": canary.get("request_id"),
+                "retryable": bool(canary.get("retryable")),
+            }
+            if canary.get("status") == "ok":
+                retry["retried"] = True
+                try:
+                    receipt = collect_once()
+                except (OpenCrabUnavailable, OSError, RuntimeError, ValueError) as exc:
+                    receipt = error_receipt(exc, "context_retry")
+                retry["attempt_count"] = 2
+                attempts.append(context_attempt_summary(2, receipt))
+            else:
+                retry["blocked_reason"] = "connection_canary_failed"
+            receipt.setdefault("tool_calls", []).insert(0, canary_call)
+            receipt["observed_tool_call_count"] = sum(
+                1 for row in receipt.get("tool_calls") or [] if isinstance(row, dict) and row.get("status") == "observed"
+            )
+            receipt["failed_tool_call_count"] = sum(
+                1 for row in receipt.get("tool_calls") or [] if isinstance(row, dict) and row.get("status") == "failed"
+            )
+        retry["attempts"] = attempts
+        receipt["retry"] = retry
         receipt["observed_at"] = utc_now()
         artifact = self.service._write_artifact(
             mission_id,
@@ -2248,7 +2455,16 @@ class ColonyExecutor:
             },
         )
         if observed_status not in {"observed", "cached"}:
-            raise RuntimeError("OpenCrab MCP context failed: %s" % (receipt.get("error") or status))
+            details = opencrab_error_details(receipt, default_stage="context_collection")
+            raise RuntimeError(
+                "OpenCrab MCP context failed: %s (error_code=%s stage=%s request_id=%s)"
+                % (
+                    details["message"],
+                    details["error_code"],
+                    details["stage"],
+                    details["request_id"] or "none",
+                )
+            )
         if not evidence_rows and not metadata_only_lookup:
             raise RuntimeError("OpenCrab MCP returned no evidence; Queen turn was not spent")
         if self.goal_plan.get("graph_required") and receipt.get("graph_gate") != "pass":
@@ -2368,6 +2584,7 @@ class ColonyExecutor:
                 plan_fields.update(
                     {
                         "requires_write": self.goal_plan.get("requires_write"),
+                        "worker_write_scope": "task_contract_only" if self.goal_plan.get("requires_write") else "none",
                         "requires_oracle_model": self.goal_plan.get("requires_oracle_model"),
                         "acceptance_checks": self.goal_plan.get("acceptance_checks") or [],
                         "stop_conditions": self.goal_plan.get("stop_conditions") or [],
@@ -2484,16 +2701,13 @@ class ColonyExecutor:
                 "Return exactly these sections: GOAL_RESTATEMENT, SUBGOALS, CONSTRAINTS, SUCCESS_CHECKS, NEXT_ACTION. "
                 "The user objective and goal graph are authoritative. Do not claim evidence retrieval or tool execution."
             )
-        if (
-            role is Role.WORKER
-            and bool(self.goal_plan.get("requires_write"))
-            and str(getattr(self.bridge, "executor_name", "")) == "host_current_model"
-        ):
+        if self._host_worker_artifact_required(role):
             rendered += (
                 "\n\nHOST WORKER ARTIFACT CONTRACT:\n"
                 "The host text channel cannot directly edit arbitrary workspace files. If this bounded task can be satisfied by exactly one mission-local text artifact, include exactly one physical line in your response using this syntax: "
                 "HOST_WORKER_ARTIFACT_V1:{\"relative_path\":\".crabagent/artifacts/<safe-name>.md\",\"content\":\"<UTF-8 text with JSON escapes>\"}. "
                 "Only a direct-child .md, .txt, or .json artifact is supported, maximum 16 KiB, and existing files are never overwritten. "
+                "The directive may be indented or enclosed by a Markdown code fence, but it must remain one complete physical line and must not be wrapped in another JSON envelope. "
                 "Do not emit this directive for any other path or for a task that needs source/user/external mutation; fail closed instead."
             )
         if role is Role.QUEEN and repair_contract:
@@ -2521,14 +2735,11 @@ class ColonyExecutor:
                 "\n\nKING OUTPUT CONTRACT:\n"
                 "Return exactly GOAL_RESTATEMENT, SUBGOALS, CONSTRAINTS, SUCCESS_CHECKS, NEXT_ACTION."
             )
-        if (
-            role is Role.WORKER
-            and bool(self.goal_plan.get("requires_write"))
-            and str(getattr(self.bridge, "executor_name", "")) == "host_current_model"
-        ):
+        if self._host_worker_artifact_required(role):
             compact_result += (
                 "\n\nHOST WORKER ARTIFACT CONTRACT: include exactly one one-line "
                 "HOST_WORKER_ARTIFACT_V1 JSON directive for one direct-child .md/.txt/.json under .crabagent/artifacts, max 16 KiB, no overwrite. "
+                "Indentation or a surrounding Markdown code fence is accepted, but do not wrap the directive in another JSON envelope. "
                 "If the task cannot fit that boundary, fail closed."
             )
         if role is Role.QUEEN and repair_contract:
@@ -2565,6 +2776,29 @@ class ColonyExecutor:
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
+    def _host_worker_artifact_required(self, role: Role) -> bool:
+        return (
+            role is Role.WORKER
+            and bool(self.goal_plan.get("requires_write"))
+            and str(getattr(self.bridge, "executor_name", "")) == "host_current_model"
+        )
+
+    def _align_worker_write_scope(self, mission_id: str, task: Dict[str, Any]) -> None:
+        """Keep persisted task metadata aligned with the compiled write gate."""
+        if Role(task["role"]) is not Role.WORKER or not self.goal_plan.get("requires_write"):
+            return
+        required_scope = "task_contract_only"
+        if str(task.get("write_scope") or "none") == required_scope:
+            return
+        self.store.set_task_write_scope(task["task_id"], required_scope, Role.WORKER)
+        task["write_scope"] = required_scope
+        self.store.append_event(
+            mission_id,
+            "worker_write_scope_aligned",
+            Role.WORKER.value,
+            {"task_id": task["task_id"], "write_scope": required_scope, "requires_write": True},
+        )
+
     def _run_codex_role(
         self,
         mission_id: str,
@@ -2591,6 +2825,7 @@ class ColonyExecutor:
             raise RuntimeError(
                 "HOST_MODEL_EXECUTOR_UNAVAILABLE: host policy cannot use %s" % executor_name
             )
+        self._align_worker_write_scope(mission_id, task)
         self.store.set_task_status(task["task_id"], TaskStatus.RUNNING, role)
         receipt_tool_name = str(getattr(self.bridge, "receipt_tool_name", "codex.app-server.turn"))
         observation_source = str(getattr(self.bridge, "observation_source", executor_name))
@@ -2711,7 +2946,7 @@ class ColonyExecutor:
             content = turn.text or "Model turn completed without a textual response. Inspect tool receipts and workspace changes."
             if executor_name == "host_current_model" and _HOST_WORKER_ARTIFACT_PREFIX in content and role is not Role.WORKER:
                 raise RuntimeError("HOST_WORKER_ARTIFACT_ROLE_INVALID: artifact directives are accepted only from WORKER")
-            if role is Role.WORKER and executor_name == "host_current_model" and bool(self.goal_plan.get("requires_write")):
+            if self._host_worker_artifact_required(role):
                 content = self._apply_host_worker_artifact(mission_id, task, attempt["attempt_id"], content)
             if role is Role.QUEEN and self.goal_plan.get("ontology_required"):
                 content = self._normalize_queen_interpretation(content)

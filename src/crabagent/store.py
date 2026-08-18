@@ -1450,6 +1450,29 @@ class ColonyStore:
                 connection,
             )
 
+    def set_task_write_scope(self, task_id: str, write_scope: str, actor: Role) -> None:
+        """Repair the persisted task contract when an older mission is resumed."""
+        value = str(write_scope or "none").strip() or "none"
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT mission_id, write_scope FROM task_slots WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("unknown task: %s" % task_id)
+            if str(row["write_scope"] or "none") == value:
+                return
+            connection.execute(
+                "UPDATE task_slots SET write_scope = ?, updated_at = ? WHERE task_id = ?",
+                (value, utc_now(), task_id),
+            )
+            self.append_event(
+                row["mission_id"],
+                "task_write_scope_updated",
+                actor.value,
+                {"task_id": task_id, "from": row["write_scope"], "to": value, "reason": "worker_contract_alignment"},
+                connection,
+            )
+
     def assign_role(self, assignment: RoleAssignment) -> None:
         route = assignment.route
         with self.connection() as connection:

@@ -3,7 +3,31 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import json
 
+from crabagent.opencrab import OpenCrabUnavailable
 from crabagent.ontology_context import OntologyContextCollector, compact_context
+
+
+def test_context_receipt_preserves_structured_transient_tool_failure() -> None:
+    def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        raise OpenCrabUnavailable(
+            "MCP query timed out",
+            error_code="OPENCRAB_MCP_TIMEOUT",
+            stage="tool:opencrab_query",
+            request_id="req-context-1",
+            retryable=True,
+        )
+
+    receipt = OntologyContextCollector(call_tool).collect("transient context")
+
+    assert receipt["status"] == "error"
+    assert receipt["error_code"] == "OPENCRAB_MCP_TIMEOUT"
+    assert receipt["error_stage"] == "tool:opencrab_query"
+    assert receipt["request_id"] == "req-context-1"
+    assert receipt["retryable"] is True
+    failed = receipt["tool_calls"][0]
+    assert failed["error_code"] == "OPENCRAB_MCP_TIMEOUT"
+    assert failed["stage"] == "tool:opencrab_query"
+    assert failed["request_id"] == "req-context-1"
 
 
 def test_graph_context_uses_real_mcp_tools_only_when_goal_requires_graph() -> None:

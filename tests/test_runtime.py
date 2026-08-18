@@ -63,6 +63,35 @@ def test_host_worker_artifact_directive_is_strict_and_bounded() -> None:
         )
 
 
+def test_host_worker_artifact_directive_accepts_indentation_fences_and_korean_text() -> None:
+    payload = __import__("json").dumps(
+        {
+            "relative_path": ".crabagent/artifacts/korean-verification.md",
+            "content": "실물 검증 결과: ledger readback 통과\n",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    cleaned, spec = _parse_host_worker_artifact_directive(
+        "검증을 마쳤습니다.\n```json\n  HOST_WORKER_ARTIFACT_V1:" + payload + "\n```\n다음 단계는 Oracle 확인입니다."
+    )
+    assert cleaned == "검증을 마쳤습니다.\n다음 단계는 Oracle 확인입니다."
+    assert spec is not None
+    assert spec["content"].startswith("실물 검증 결과")
+
+    one_line_cleaned, one_line_spec = _parse_host_worker_artifact_directive(
+        "  ```HOST_WORKER_ARTIFACT_V1:" + payload + "```  "
+    )
+    assert one_line_cleaned == "Bounded host-worker artifact prepared."
+    assert one_line_spec is not None
+
+    with pytest.raises(ValueError, match="exactly one"):
+        _parse_host_worker_artifact_directive(
+            "```\nHOST_WORKER_ARTIFACT_V1:" + payload + "\n```\n"
+            "HOST_WORKER_ARTIFACT_V1:" + payload + "\n"
+        )
+
+
 def test_initialize_creates_all_durable_contract_tables(tmp_path: Path) -> None:
     service = RuntimeService(tmp_path)
     result = service.initialize()

@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Any, Dict
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 import json
 import time
 
@@ -403,6 +403,37 @@ def test_opencrab_transport_errors_do_not_expose_endpoint_credentials() -> None:
 
     assert str(caught.value) == "OpenCrab MCP request failed"
     assert secret not in str(caught.value)
+
+
+def test_opencrab_transport_error_preserves_retry_metadata_without_secrets() -> None:
+    def timeout_opener(*args: Any, **kwargs: Any) -> Any:
+        raise TimeoutError("simulated timeout")
+
+    client = opencrab.OpenCrabMcpClient("https://example.test/mcp", opener=timeout_opener)
+    with pytest.raises(opencrab.OpenCrabUnavailable) as caught:
+        client.initialize()
+
+    details = opencrab.opencrab_error_details(caught.value, default_stage="test")
+    assert details["error_code"] == "OPENCRAB_MCP_TIMEOUT"
+    assert details["stage"] == "mcp.initialize"
+    assert details["request_id"] == client.last_request_id
+    assert details["retryable"] is True
+    assert "simulated timeout" not in str(caught.value)
+
+
+def test_opencrab_http_error_classifies_transient_and_auth_failures() -> None:
+    for status_code, expected_retryable in ((503, True), (401, False)):
+        def opener(*args: Any, _status_code=status_code, **kwargs: Any) -> Any:
+            raise HTTPError("https://example.test/mcp?secret=redacted", _status_code, "failure", {}, None)
+
+        client = opencrab.OpenCrabMcpClient("https://example.test/mcp", opener=opener)
+        with pytest.raises(opencrab.OpenCrabUnavailable) as caught:
+            client.initialize()
+        details = opencrab.opencrab_error_details(caught.value)
+        assert details["error_code"] == "OPENCRAB_HTTP_ERROR"
+        assert details["status_code"] == status_code
+        assert details["retryable"] is expected_retryable
+        assert "example.test" not in details["message"]
 
 
 class EventStreamResponse:

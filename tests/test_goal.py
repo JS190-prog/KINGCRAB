@@ -88,6 +88,8 @@ def test_clear_code_goal_uses_one_model_turn_and_local_gates(tmp_path: Path) -> 
     )
     assert [row["role"] for row in snapshot["tasks"]] == plan.stages
     assert [row["provider"] for row in snapshot["assignments"]] == ["local", "codex", "local"]
+    worker = next(row for row in snapshot["tasks"] if row["role"] == "WORKER")
+    assert worker["write_scope"] == "task_contract_only"
     assert snapshot["goal_plan"]["estimated_model_turns"] == 1
 
 
@@ -333,6 +335,21 @@ def test_queen_write_prompt_is_read_only_and_hands_off_to_worker(tmp_path: Path)
     prompt = executor._prompt(Role.QUEEN, executor.goal_plan["objective"], [])
     assert "QUEEN IS READ-ONLY" in prompt
     assert "WORKER alone may change the workspace" in prompt
+
+
+def test_host_worker_prompt_always_carries_artifact_contract(tmp_path: Path) -> None:
+    service = RuntimeService(tmp_path)
+    session = service.store.create_session(interaction_mode="colony")
+
+    class HostBridge:
+        executor_name = "host_current_model"
+
+    executor = ColonyExecutor(service, session["session_id"], HostBridge(), threading.Event())
+    executor.goal_plan = classify_goal("오픈크랩 근거를 바탕으로 result.txt를 만들어줘").to_dict()
+    prompt = executor._prompt(Role.WORKER, executor.goal_plan["objective"], ["prior output " * 1000] * 3)
+    assert "HOST WORKER ARTIFACT CONTRACT" in prompt
+    assert "HOST_WORKER_ARTIFACT_V1" in prompt
+    assert "another JSON envelope" in prompt
 
 
 def test_token_gate_uses_uncached_input_not_persistent_thread_total(tmp_path: Path) -> None:
@@ -678,6 +695,71 @@ def _mcp_context() -> dict:
         "retrieval": {"scanned": 1, "top_k": 1},
         "pack_scope": {"packages": 1, "package_ids": ["pack-brand"]},
     }
+
+
+def test_transient_opencrab_context_failure_revalidates_and_retries_once(tmp_path: Path) -> None:
+    service = RuntimeService(tmp_path)
+    session = service.store.create_session(interaction_mode="colony")
+    calls = []
+
+    def loader(arguments):
+        if arguments.get("__kingcrab_tool__") == "opencrab_status":
+            calls.append("opencrab_status")
+            return {"status": "ok"}
+        calls.append("opencrab_query")
+        if calls.count("opencrab_query") == 1:
+            raise TimeoutError("simulated MCP context timeout")
+        return _mcp_context()
+
+    class Bridge:
+        thread_id = "thread-opencrab-retry"
+        last_start_mode = "started"
+
+        def start(self) -> str:
+            return self.thread_id
+
+        def run_turn(self, prompt, emit, **kwargs):
+            return CodexLiveTurn(
+                thread_id=self.thread_id,
+                turn_id="turn-queen",
+                status="completed",
+                text=(
+                    "SELECTED_PATH\n브랜드 근거 경로\n"
+                    "SUPPORTED_CLAIMS\n브랜드 근거가 확인됨 [evidence_id: ev-1]\n"
+                    "GAPS\n추가 공백 없음\n"
+                    "NEXT_ACTION\nSTOP"
+                ),
+                usage={"last": {"totalTokens": 25}},
+                started_at="now",
+                finished_at="now",
+            )
+
+    executor = ColonyExecutor(
+        service,
+        session["session_id"],
+        Bridge(),
+        threading.Event(),
+        opencrab_context_loader=loader,
+    )
+    snapshot = executor.run(
+        "오픈크랩 팩을 조회해서 브랜드 전략에 도움이 될 근거를 찾아줘",
+        max_workers=1,
+        worker_policy="fixed",
+    )
+
+    assert snapshot["mission"]["status"] == "completed"
+    assert calls == ["opencrab_query", "opencrab_status", "opencrab_query"]
+    context_artifact = next(row for row in snapshot["artifacts"] if row["kind"] == "mcp_context_receipt")
+    receipt = json.loads(Path(context_artifact["path"]).read_text(encoding="utf-8"))
+    assert receipt["retry"]["policy"] == "read_only_bounded_once"
+    assert receipt["retry"]["retried"] is True
+    assert receipt["retry"]["attempt_count"] == 2
+    assert receipt["retry"]["canary"]["scope_revalidated"] is True
+    assert receipt["retry"]["attempts"][0]["error_code"] == "OPENCRAB_MCP_TIMEOUT"
+    assert receipt["retry"]["attempts"][0]["retryable"] is True
+    before_reuse = list(calls)
+    executor._load_opencrab_context("already-completed", {}, "attempt-unused", "same context")
+    assert calls == before_reuse
 
 
 def test_adaptive_colony_executes_only_the_required_model_turns(tmp_path: Path) -> None:
