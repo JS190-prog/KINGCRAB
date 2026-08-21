@@ -291,6 +291,20 @@ def test_english_do_not_create_is_not_write_intent() -> None:
     assert plan.requires_write is False
 
 
+def test_external_change_prohibition_and_host_synthesis_are_not_workspace_write() -> None:
+    plan = classify_goal(
+        "외부 변경 금지, 정확히 5문장으로 합성",
+        selected_pack_count=1,
+    )
+
+    assert plan.requires_write is False
+    assert plan.outcome_type != "workspace_change"
+    assert plan.action_mode == "explain"
+    assert plan.external_scouting is False
+    assert plan.requires_model_queen is True
+    assert "WORKER" not in plan.stages
+
+
 @pytest.mark.parametrize(
     "objective",
     [

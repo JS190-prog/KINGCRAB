@@ -81,6 +81,12 @@ NEGATED_WRITE_PHRASES = (
     "without editing",
     "without writing",
     "without creating",
+    "no external changes",
+    "without external changes",
+    "external changes prohibited",
+    "external mutation prohibited",
+    "do not change external state",
+    "do not mutate external state",
     "만들지",
     "고치지",
     "수정하지",
@@ -90,6 +96,10 @@ NEGATED_WRITE_PHRASES = (
     "추가하지",
     "삭제하지",
     "변경하지",
+    "변경 금지",
+    "변경을 금지",
+    "변경해서는 안",
+    "변경하면 안",
     "작성하지",
     "개발하지",
 )
@@ -101,7 +111,9 @@ NEGATED_SCOPE_CONTEXTS = (
     # English negative-scope clauses must not activate knowledge/external routing.
     r"\b(?:do not|don't|must not)\b[^.!?;\n]*\b(?:opencrab|ontology|knowledge graph|rag|evidence|mcp|web|internet|external|browser|crawl|research|search)\b[^.!?;\n]*",
     r"\bwithout\b[^.!?;\n]*\b(?:opencrab|ontology|knowledge graph|rag|evidence|mcp|web|internet|external|browser|crawl|research|search)\b[^.!?;\n]*",
+    r"\b(?:no|without|never|avoid)\s+external\s+(?:changes?|mutations?|writes?)\b",
     # Korean equivalents, including phrases such as '오픈크랩을 사용하지 말고'.
+    r"외부\s*(?:변경|상태|데이터)\s*(?:금지|하지\s*마|하지\s*말|하지\s*않)",
     r"(?:오픈크랩|온톨로지|지식\s*그래프|근거|팩|웹|인터넷|외부\s*서비스|브라우저|검색|조사)[^.!?;\n]{0,60}(?:사용하지|접근하지|조회하지|검색하지|조사하지|쓰지|말고|않고|없이|금지)[^.!?;\n]*",
 )
 
@@ -259,6 +271,9 @@ SEMANTIC_SYNTHESIS_SIGNALS = (
     "인사이트",
     "해석",
     "분석",
+    "합성",
+    "synthesize",
+    "synthesis",
     "전략",
     "우선순위",
     "평가",
