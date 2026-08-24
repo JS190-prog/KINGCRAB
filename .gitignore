@@ -8,3 +8,6 @@ build/
 .crabagent/
 .DS_Store
 local_artifacts/
+.localcode/
+dist_*/
+uv.lock
