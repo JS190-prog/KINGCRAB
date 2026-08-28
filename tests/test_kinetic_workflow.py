@@ -53,6 +53,31 @@ def test_lookup_compiles_to_typed_observation_operator_without_write_or_model() 
     assert "evidence_can_only_enter_from_observed_mcp_receipt" in workflow["state_invariants"]
 
 
+def test_read_only_worker_compiles_non_mutating_deliverable_step() -> None:
+    objective = (
+        "OpenCrab 자료는 읽기만 하며 프로젝트·팩·문서를 수정하지 않는다. "
+        "WORKER는 evidence ID가 포함된 실제 업무 후보표만 작성한다. "
+        "ORACLE은 WORKER 결과와 provenance만 검증한다. graph_required=false."
+    )
+    plan = classify_goal(objective, selected_project_count=1)
+    graph = {"graph_id": "goal-read-only-worker", "decision_slots": plan.response_contract}
+
+    workflow = compile_kinetic_workflow(plan.to_dict(), graph)
+    steps = {row["id"]: row for row in workflow["steps"]}
+
+    assert plan.requires_write is False
+    assert plan.requires_worker_output is True
+    assert "execute_action" not in steps
+    assert steps["produce_deliverable"]["operator"] == "produce_evidence_bound_deliverable"
+    assert steps["produce_deliverable"]["outputs"] == ["worker_result", "worker_receipt"]
+    assert steps["produce_deliverable"]["write_scope"] == "none"
+    assert "worker_result" in steps["verify_result"]["inputs"]
+    assert "workspace_change" not in steps["verify_result"]["inputs"]
+    assert workflow["output_contract"]["requires_write"] is False
+    assert workflow["output_contract"]["requires_worker_output"] is True
+    assert "non_mutating_worker_never_emits_workspace_change" in workflow["state_invariants"]
+
+
 def test_metadata_lookup_runs_to_oracle_with_zero_model_turns(tmp_path: Path) -> None:
     service = RuntimeService(tmp_path)
     session = service.store.create_session(interaction_mode="colony")

@@ -1,4 +1,5 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import json
 import threading
 import pytest
@@ -247,6 +248,44 @@ def test_negated_write_signal_does_not_create_workspace_change() -> None:
     assert plan.action_mode in {"lookup", "explain", "research"}
 
 
+def test_sejong_read_only_worker_contract_overrides_write_and_graph_heuristics() -> None:
+    objective = (
+        "새 durable 증거감사 미션을 생성한다. "
+        "OpenCrab 자료는 읽기만 하며 변경·인제스트·연결수정은 하지 않는다. "
+        "WORKER는 독후감을 작성하지 말고 실제 업무 근거 후보표만 작성하고 개인 역할과 조직 업무를 분리한다. "
+        "ORACLE은 provenance, 개인 역할 확인 여부, 민감정보, 수치 충돌만 검증한다. "
+        "독후감 수정본은 작성하지 않는다. "
+        "그래프 경로가 없어도 lexical·vector·document evidence로 계속하며 graph_required=false로 판정한다."
+    )
+
+    plan = classify_goal(objective, selected_project_count=3, knowledge_available=True)
+
+    assert plan.kind == "ontology_research"
+    assert plan.ontology_required is True
+    assert plan.graph_required is False
+    assert plan.ontology_mode != "graph_path"
+    assert plan.requires_write is False
+    assert plan.requires_worker_output is True
+    assert plan.outcome_type == "ontology_brief"
+    assert plan.action_mode != "execute"
+    assert plan.action_required is False
+    assert plan.stages == ["KING", "QUEEN", "SOLDIER", "WORKER", "ORACLE"]
+    assert "worker_result_observed" in plan.acceptance_checks
+    assert "graph_path_has_bounded_nodes_or_edges" not in plan.acceptance_checks
+    assert "workspace_change_receipt_observed" not in plan.acceptance_checks
+    assert "workspace_change_is_bounded" not in plan.acceptance_checks
+
+
+def test_explicit_graph_contract_controls_graph_gate_in_both_directions() -> None:
+    disabled = classify_goal("Use OpenCrab evidence; graph_required=false and continue without a graph path.")
+    enabled = classify_goal("Use OpenCrab evidence; graph_required=true and inspect the evidence path.")
+
+    assert disabled.graph_required is False
+    assert disabled.ontology_mode != "graph_path"
+    assert enabled.graph_required is True
+    assert enabled.ontology_mode == "graph_path"
+
+
 def test_positive_write_survives_negative_scope_constraint() -> None:
     plan = classify_goal(
         "오픈크랩 근거로 result.txt를 만들어. 다른 파일은 수정하지 마."
@@ -364,6 +403,29 @@ def test_host_worker_prompt_always_carries_artifact_contract(tmp_path: Path) -> 
     assert "HOST WORKER ARTIFACT CONTRACT" in prompt
     assert "HOST_WORKER_ARTIFACT_V1" in prompt
     assert "another JSON envelope" in prompt
+
+
+def test_non_mutating_worker_and_oracle_prompts_preserve_read_only_boundary() -> None:
+    objective = (
+        "OpenCrab 자료는 읽기만 하며 프로젝트·팩·문서를 수정하지 않는다. "
+        "WORKER는 evidence ID가 포함된 실제 업무 후보표만 작성한다. "
+        "ORACLE은 WORKER 결과와 provenance만 검증한다. graph_required=false."
+    )
+    with TemporaryDirectory(prefix="kingcrab-readonly-worker-") as temp_dir:
+        service = RuntimeService(Path(temp_dir))
+        session = service.store.create_session(interaction_mode="colony")
+        executor = ColonyExecutor(service, session["session_id"], object(), threading.Event())
+        executor.goal_plan = classify_goal(objective, selected_project_count=1).to_dict()
+
+        worker_prompt = executor._prompt(Role.WORKER, objective, ["QUEEN evidence handoff"])
+        oracle_prompt = executor._prompt(Role.ORACLE, objective, ["WORKER candidate table"])
+
+        assert executor.goal_plan["requires_write"] is False
+        assert executor.goal_plan["requires_worker_output"] is True
+        assert "NON-MUTATING WORKER BOUNDARY" in worker_prompt
+        assert "Do not create, edit, delete, rename" in worker_prompt
+        assert "HOST WORKER ARTIFACT CONTRACT" not in worker_prompt
+        assert "require the WORKER artifact" in oracle_prompt
 
 
 def test_token_gate_uses_uncached_input_not_persistent_thread_total(tmp_path: Path) -> None:

@@ -49,6 +49,8 @@ def compile_kinetic_workflow(
     action_mode = str(plan.get("action_mode") or "answer")
     graph_required = bool(plan.get("graph_required"))
     requires_write = bool(plan.get("requires_write"))
+    requires_worker_output = bool(plan.get("requires_worker_output"))
+    worker_required = requires_write or requires_worker_output
     requires_model_queen = bool(plan.get("requires_model_queen"))
     requires_model_planning = bool(plan.get("requires_model_planning"))
     requires_oracle_model = bool(plan.get("requires_oracle_model"))
@@ -161,26 +163,41 @@ def compile_kinetic_workflow(
             gate="no_unresolved_required_gate",
         )
     )
-    if requires_write:
-        steps.append(
-            _step(
-                "execute_action",
-                "execute_bounded_change",
-                "WORKER",
-                ["decision_packet", "soldier_report"],
-                ["workspace_change", "worker_receipt"],
-                model_required=True,
-                write_scope="task_contract_only",
-                gate="worker_approval_and_scope",
+    if worker_required:
+        if requires_write:
+            steps.append(
+                _step(
+                    "execute_action",
+                    "execute_bounded_change",
+                    "WORKER",
+                    ["decision_packet", "soldier_report"],
+                    ["workspace_change", "worker_receipt"],
+                    model_required=True,
+                    write_scope="task_contract_only",
+                    gate="worker_approval_and_scope",
+                )
             )
-        )
+        else:
+            steps.append(
+                _step(
+                    "produce_deliverable",
+                    "produce_evidence_bound_deliverable",
+                    "WORKER",
+                    ["decision_packet", "soldier_report"],
+                    ["worker_result", "worker_receipt"],
+                    model_required=True,
+                    write_scope="none",
+                    gate="worker_evidence_and_scope",
+                )
+            )
     steps.append(
         _step(
             "verify_result",
             "verify_and_publish_or_stop",
             "ORACLE",
             (["decision_packet", "ontology_ledger", "soldier_report"] if ontology else ["decision_packet", "soldier_report"])
-            + (["workspace_change"] if requires_write else []),
+            + (["workspace_change"] if requires_write else [])
+            + (["worker_result"] if requires_worker_output and not requires_write else []),
             ["oracle_verdict", "goal_outcome"],
             model_required=requires_oracle_model,
             gate="all_required_receipts",
@@ -207,11 +224,13 @@ def compile_kinetic_workflow(
             "decision_requires_bound_evidence_slots",
             "worker_receives_decision_packet_not_full_catalog",
             "oracle_publishes_only_after_required_receipts",
+            "non_mutating_worker_never_emits_workspace_change",
         ],
         "output_contract": {
             "decision_slots": list(graph.get("decision_slots") or []),
             "action_required": bool(plan.get("action_required")),
             "requires_write": requires_write,
+            "requires_worker_output": requires_worker_output,
             "ontology_ledger_required": ontology,
         },
     }

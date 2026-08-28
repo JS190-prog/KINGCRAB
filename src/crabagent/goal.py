@@ -104,6 +104,28 @@ NEGATED_WRITE_PHRASES = (
     "개발하지",
 )
 
+NEGATED_WRITE_CONTEXTS = (
+    r"\b(?:do not|don't|must not|never)\b[^.!?;\n]{0,48}\b(?:build|create|fix|implement|install|deploy|edit|add|remove|update|refactor|write|save|modify)\w*\b",
+    r"\bwithout\b[^.!?;\n]{0,36}\b(?:changing|modifying|editing|writing|creating|saving|updating)\b",
+    r"(?:만들|고치|수정|구현|설치|배포|추가|삭제|변경|작성|개발)(?:(?:하거나|하고|하며|·|및|,)\s*(?:[가-힣A-Za-z_]+)){0,3}(?:은|는|을|를|도|만)?\s*하지\s*(?:마|말|않)",
+    r"(?:만들기|고치기|수정|구현|설치|배포|추가|삭제|변경|작성|개발)\s*(?:은|는|을|를)?\s*금지",
+)
+
+EXPLICIT_BOOLEAN_CONTRACT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<key>graph_required|requires_write|read_only|requires_worker_output)\s*[:=]\s*(?P<value>true|false|1|0|yes|no)(?![A-Za-z0-9_])",
+    flags=re.IGNORECASE,
+)
+
+NEGATED_GRAPH_CONTEXTS = (
+    r"(?:graph|graph\s+path|graph\s+traversal|relationship\s+graph)[^.!?;\n]{0,60}(?:not\s+required|optional|do\s+not|don't|without|skip|avoid|없어도)",
+    r"(?:그래프|그래프\s*경로|관계\s*그래프)[^.!?;\n]{0,60}(?:필요\s*없|없어도|하지\s*마|하지\s*말|하지\s*않|금지|제외|배제)",
+)
+
+WORKER_OUTPUT_PATTERNS = (
+    r"(?<![A-Za-z0-9_])worker(?![A-Za-z0-9_])[^.!?;\n]{0,220}(?:후보표|근거표|결과표|산출물|보고서|worker_result|deliverable|output|table|report)[^.!?;\n]{0,120}(?:작성|정리|생성|produce|write|draft|return)",
+    r"(?<![A-Za-z0-9_])worker(?![A-Za-z0-9_])[^.!?;\n]{0,220}(?:작성|정리|생성|produce|write|draft|return)[^.!?;\n]{0,120}(?:후보표|근거표|결과표|산출물|보고서|worker_result|deliverable|output|table|report)",
+)
+
 # These words describe an observed change, not an instruction to make one.
 # Remove only the bounded read/list forms so imperative requests such as
 # "update the config" and "파일을 수정해" remain write intent.
@@ -123,6 +145,7 @@ READ_ONLY_CHANGE_CONTEXTS = (
     r"\b(?:show|list|view|read|check|inspect|review|display)\b(?:\s+(?:the|all|recent|current))?\s+(?:changes?|updates?|modifications?|revisions?|edits?|additions?|deletions?)(?:\s+(?:history|logs?|records?|list))?\b",
     r"(?:변경|수정|추가|삭제|업데이트)(?:된|한)?\s*(?:내역|이력|기록|목록|사항|내용|파일|항목|문서)",
     r"(?:파일|항목|문서|프로젝트|팩)\s*(?:변경|수정|추가|삭제|업데이트)\s*(?:내역|이력|기록|목록|사항)",
+    r"(?:수정|변경|업데이트)(?:본|안|사항|내용|범위|대상|결과|이력|내역)",
 )
 
 RESEARCH_SIGNALS = (
@@ -312,6 +335,26 @@ def _contains_graph_signal(text: str) -> bool:
             return True
     return False
 
+def _explicit_boolean_contract(text: str, key: str) -> Optional[bool]:
+    requested_key = str(key or "").strip().casefold()
+    for match in EXPLICIT_BOOLEAN_CONTRACT_RE.finditer(str(text or "")):
+        if str(match.group("key") or "").casefold() != requested_key:
+            continue
+        return str(match.group("value") or "").casefold() in {"true", "1", "yes"}
+    return None
+
+
+def _contains_negated_graph_context(text: str) -> bool:
+    return any(re.search(pattern, str(text or ""), flags=re.IGNORECASE) for pattern in NEGATED_GRAPH_CONTEXTS)
+
+
+def _requires_worker_output(text: str) -> bool:
+    explicit = _explicit_boolean_contract(text, "requires_worker_output")
+    if explicit is not None:
+        return explicit
+    return any(re.search(pattern, str(text or ""), flags=re.IGNORECASE) for pattern in WORKER_OUTPUT_PATTERNS)
+
+
 def _scope_signal_text(text: str) -> str:
     scrubbed = text
     for pattern in NEGATED_SCOPE_CONTEXTS:
@@ -323,6 +366,8 @@ def _contains_write_intent(text: str) -> bool:
     scrubbed = text
     for phrase in NEGATED_WRITE_PHRASES:
         scrubbed = scrubbed.replace(phrase, "")
+    for pattern in NEGATED_WRITE_CONTEXTS:
+        scrubbed = re.sub(pattern, " ", scrubbed, flags=re.IGNORECASE)
     for pattern in READ_ONLY_CHANGE_CONTEXTS:
         scrubbed = re.sub(pattern, " ", scrubbed, flags=re.IGNORECASE)
     return _contains(scrubbed, WRITE_SIGNALS)
@@ -341,6 +386,7 @@ class GoalPlan:
     ontology_mode: str
     external_scouting: bool
     requires_write: bool
+    requires_worker_output: bool
     requires_verification: bool
     requires_model_planning: bool
     requires_model_queen: bool
@@ -410,7 +456,14 @@ def classify_goal(
     )
     contextual_ontology = selected_context_ontology or ambient_knowledge
     ontology = _contains(signal_text, ONTOLOGY_SIGNALS) or contextual_ontology
+    explicit_write = _explicit_boolean_contract(text, "requires_write")
+    explicit_read_only = _explicit_boolean_contract(text, "read_only")
     writes = _contains_write_intent(text)
+    if explicit_write is not None:
+        writes = explicit_write
+    if explicit_read_only is True:
+        writes = False
+    requires_worker_output = _requires_worker_output(text)
     research = _contains(signal_text, RESEARCH_SIGNALS)
     external = _contains(signal_text, EXTERNAL_SIGNALS)
     high_risk = _contains(signal_text, HIGH_RISK_SIGNALS) or len(clean) > 320
@@ -418,7 +471,13 @@ def classify_goal(
         ontology
         and (len(clean) > 180 or _contains(signal_text, KING_STRATEGY_SIGNALS))
     )
-    graph_required = ontology and _contains_graph_signal(signal_text)
+    explicit_graph_required = _explicit_boolean_contract(text, "graph_required")
+    if explicit_graph_required is not None:
+        graph_required = ontology and explicit_graph_required
+    elif _contains_negated_graph_context(text):
+        graph_required = False
+    else:
+        graph_required = ontology and _contains_graph_signal(signal_text)
 
     if forced in {"chat", "colony"}:
         forced_colony = forced == "colony"
@@ -434,8 +493,8 @@ def classify_goal(
     else:
         kind = "bounded_execution" if forced_colony else "conversation"
 
-    complexity = "strategic" if strategic else "bounded" if (writes or research or ontology) else "trivial"
-    requires_verification = writes or ontology or research or high_risk
+    complexity = "strategic" if strategic else "bounded" if (writes or requires_worker_output or research or ontology) else "trivial"
+    requires_verification = writes or requires_worker_output or ontology or research or high_risk
     requires_model_planning = strategic
     direct_lookup = ontology and not writes and not external and not strategic and _contains(signal_text, DIRECT_LOOKUP_SIGNALS)
     semantic_synthesis = ontology and _contains(signal_text, SEMANTIC_SYNTHESIS_SIGNALS)
@@ -517,7 +576,7 @@ def classify_goal(
         stages.append("QUEEN")
     if external or high_risk or ontology:
         stages.append("SOLDIER")
-    if writes:
+    if writes or requires_worker_output:
         stages.append("WORKER")
     if requires_verification:
         stages.append("ORACLE")
@@ -536,7 +595,7 @@ def classify_goal(
         model_turns += 1  # QUEEN interpretation
     if external:
         model_turns += 1  # SOLDIER scout
-    if writes:
+    if writes or requires_worker_output:
         model_turns += 1  # WORKER
     if requires_oracle_model:
         model_turns += 1  # ORACLE
@@ -594,6 +653,8 @@ def classify_goal(
         rationale.append("external retrieval/scouting is requested; SOLDIER owns scope and waste checks")
     if writes:
         rationale.append("a bounded WORKER is required to change the workspace")
+    elif requires_worker_output:
+        rationale.append("a non-mutating WORKER deliverable is explicitly required and must remain evidence-bound")
     if not requires_model_planning:
         rationale.append("clear goal: KING is compiled locally and does not spend a planning turn")
     if direct_lookup:
@@ -614,6 +675,8 @@ def classify_goal(
         acceptance_checks.append("goal_specific_next_action_is_executable")
     if writes:
         acceptance_checks.extend(["workspace_change_receipt_observed", "workspace_change_is_bounded", "focused_verification_receipt_observed"])
+    elif requires_worker_output:
+        acceptance_checks.append("worker_result_observed")
     if requires_oracle_model:
         acceptance_checks.append("oracle_model_review_observed")
     else:
@@ -632,6 +695,7 @@ def classify_goal(
         ontology_required=ontology,
         external_scouting=external,
         requires_write=writes,
+        requires_worker_output=requires_worker_output,
         requires_verification=requires_verification,
         requires_model_planning=requires_model_planning,
         requires_model_queen=requires_model_queen,

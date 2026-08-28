@@ -56,7 +56,7 @@ from .store import new_id
 ROLE_INSTRUCTIONS = {
     Role.KING: "Compile the objective into an acceptance-gated workflow. Do not edit files or retrieve broad context.",
     Role.QUEEN: "Retrieve and shape only the minimum ontology path needed for this goal. Preserve evidence references and do not invent sources.",
-    Role.WORKER: "Execute only the bounded deliverable in the workspace. Use the Queen handoff when present, preserve user changes, and run focused verification.",
+    Role.WORKER: "Produce only the bounded deliverable. When requires_write is false, return the requested evidence-backed result without editing workspace or external state. When requires_write is true, use the Queen handoff, preserve user changes, and run focused verification.",
     Role.SOLDIER: "Patrol evidence, scope, duplicate work, and waste. Stop or quarantine only what the receipts justify.",
     Role.ORACLE: "Inspect actual artifacts, receipts, evidence and verification output. Publish a concise conclusion only when the gates pass.",
 }
@@ -1280,16 +1280,25 @@ class ColonyExecutor:
                         "completed" if decision_gate == "pass" else "blocked",
                         detail={"decision_gate": decision_gate},
                     )
-                if role is Role.WORKER and self.goal_plan.get("requires_write"):
-                    change_artifact = self._record_workspace_change(mission_id, task)
-                    context.append("WORKSPACE CHANGE RECEIPT: %s" % change_artifact)
-                    self._record_kinetic_transition(
-                        mission_id,
-                        task,
-                        ["execute_action"],
-                        "completed",
-                        detail={"workspace_change_artifact_id": change_artifact},
-                    )
+                if role is Role.WORKER:
+                    if self.goal_plan.get("requires_write"):
+                        change_artifact = self._record_workspace_change(mission_id, task)
+                        context.append("WORKSPACE CHANGE RECEIPT: %s" % change_artifact)
+                        self._record_kinetic_transition(
+                            mission_id,
+                            task,
+                            ["execute_action"],
+                            "completed",
+                            detail={"workspace_change_artifact_id": change_artifact},
+                        )
+                    elif self.goal_plan.get("requires_worker_output"):
+                        self._record_kinetic_transition(
+                            mission_id,
+                            task,
+                            ["produce_deliverable"],
+                            "completed",
+                            detail={"requires_write": False, "output_contract": task.get("output_contract")},
+                        )
                 if role is Role.SOLDIER:
                     soldier_snapshot = self.store.inspect(mission_id)
                     soldier_task_state = next(
@@ -1880,6 +1889,23 @@ class ColonyExecutor:
                     except (OSError, ValueError, TypeError):
                         change_data = {}
                 workspace_change_ok = not self.goal_plan.get("requires_write") or bool(change_data.get("changed_file_count"))
+                worker_output_required = bool(self.goal_plan.get("requires_worker_output"))
+                worker_task_ids = {
+                    str(row.get("task_id") or "")
+                    for row in mission_snapshot.get("tasks") or []
+                    if str(row.get("role") or "") == Role.WORKER.value
+                    and str(row.get("task_kind") or "") != "king_subgoal"
+                }
+                worker_artifacts = [
+                    row for row in mission_snapshot.get("artifacts") or []
+                    if str(row.get("task_id") or "") in worker_task_ids
+                ]
+                worker_receipts = [
+                    row for row in mission_snapshot.get("tool_receipts") or []
+                    if str(row.get("task_id") or "") in worker_task_ids
+                    and str(row.get("status") or "") == "success"
+                ]
+                worker_output_ok = not worker_output_required or bool(worker_artifacts and worker_receipts)
                 soldier_reports = [
                     row for row in mission_snapshot.get("artifacts") or []
                     if str(row.get("kind") or "") == "soldier_patrol"
@@ -1917,6 +1943,7 @@ class ColonyExecutor:
                     and subgoal_gate
                     and ontology_contract_ok
                     and workspace_change_ok
+                    and worker_output_ok
                 )
                 data = {
                     "verdict": "accepted" if verified else "rejected",
@@ -1946,6 +1973,10 @@ class ColonyExecutor:
                     "workspace_change_receipt_count": len(change_artifacts),
                     "workspace_changed_file_count": int(change_data.get("changed_file_count") or 0),
                     "workspace_change_accepted": workspace_change_ok,
+                    "worker_output_required": worker_output_required,
+                    "worker_artifact_count": len(worker_artifacts),
+                    "worker_receipt_count": len(worker_receipts),
+                    "worker_output_accepted": worker_output_ok,
                     "soldier_report_count": len(soldier_reports),
                     "soldier_judge_accepted": soldier_ok,
                     "ontology_contract_coverage_gate": ontology_contract_coverage.get("gate"),
@@ -2584,6 +2615,7 @@ class ColonyExecutor:
                 plan_fields.update(
                     {
                         "requires_write": self.goal_plan.get("requires_write"),
+                        "requires_worker_output": self.goal_plan.get("requires_worker_output"),
                         "worker_write_scope": "task_contract_only" if self.goal_plan.get("requires_write") else "none",
                         "requires_oracle_model": self.goal_plan.get("requires_oracle_model"),
                         "acceptance_checks": self.goal_plan.get("acceptance_checks") or [],
@@ -2681,10 +2713,18 @@ class ColonyExecutor:
             )
             if self.opencrab_receipt:
                 inventory += "\n\nAUTHORITATIVE OPENCRAB MCP RECEIPT:\n%s" % self._compact_opencrab_receipt()
+        if role is Role.WORKER and self.goal_plan.get("requires_worker_output") and not self.goal_plan.get("requires_write"):
+            inventory += (
+                "\n\nNON-MUTATING WORKER BOUNDARY:\n"
+                "Produce the requested evidence-backed deliverable in the role response only. Do not create, edit, delete, rename, "
+                "or save workspace, OpenCrab, user, or external-state artifacts. Preserve every evidence ID used by a claim and mark "
+                "unconfirmed personal-role assertions as gaps."
+            )
         if role is Role.ORACLE:
             inventory += (
                 "\n\nORACLE GATE:\n"
                 "Check the persisted OpenCrab MCP context receipt, evidence IDs, graph receipts, local artifacts, and tool receipts first. "
+                "When requires_worker_output is true, require the WORKER artifact and its successful receipt and verify that no workspace-change receipt was required. "
                 "The Queen interpretation is not evidence. Re-query only a missing or contradictory evidence edge; never compensate "
                 "for missing MCP evidence with a plausible claim."
             )
