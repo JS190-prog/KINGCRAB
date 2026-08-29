@@ -344,16 +344,38 @@ def test_zero_model_mission_uses_preloaded_opencrab_context_without_runtime_endp
                 "package_labels": {},
             },
         })
+        evidence_rows = []
+        for index in range(24):
+            duplicate_pair = index in {0, 1}
+            lane_id = "actual_work" if duplicate_pair or index % 2 else "persona_policy"
+            source_index = 0 if duplicate_pair else index
+            evidence_rows.append(
+                {
+                    "id": f"ev-{index:02d}",
+                    "document_id": f"doc-{source_index:02d}",
+                    "project_id": "project-work" if lane_id == "actual_work" else "project-policy",
+                    "workspace_id": "workspace-facility" if lane_id == "actual_work" else "workspace-main",
+                    "package_id": "pack-work" if lane_id == "actual_work" else "pack-policy",
+                    "text": f"bounded observed evidence {source_index:02d}",
+                    "source": f"opencrab://document/doc-{source_index:02d}",
+                    "lane_id": lane_id,
+                    "lane_purpose": "personal_work_evidence" if lane_id == "actual_work" else "policy_only",
+                    "profile_id": "facility-management" if lane_id == "actual_work" else "main",
+                    "claim_scope": (
+                        "personal_role_confirmation_required"
+                        if lane_id == "actual_work"
+                        else "policy_only_no_personal_fact_promotion"
+                    ),
+                }
+            )
         context = {
             "status": "ok",
             "authority": "gateway_verified_mcp_response",
-            "evidence": [
-                {"id": "ev-1", "text": "TB2 pack state observed", "source": "opencrab://pack-1"}
-            ],
-            "evidence_count": 1,
+            "evidence": evidence_rows,
+            "evidence_count": 24,
             "claim_gate": "pass",
             "graph_gate": "not_required",
-            "quality": {"evidence_count": 1, "usable_evidence_count": 1},
+            "quality": {"evidence_count": 24, "usable_evidence_count": 24},
             "tool_calls": [],
         }
         submitted = server.dispatch({
@@ -389,6 +411,27 @@ def test_zero_model_mission_uses_preloaded_opencrab_context_without_runtime_endp
         assert receipts
         assert all(str(row.get("status") or "") == "success" for row in receipts)
         assert any(str(row.get("kind") or "") == "ontology_ledger" for row in detail["artifacts"])
+        opencrab_evidence = [
+            row
+            for row in detail["evidence"]
+            if str(row.get("source_type") or "") == "opencrab_mcp_evidence"
+        ]
+        expected_source_ids = {f"ev-{index:02d}" for index in range(24)}
+        expected_ledger_ids = {
+            f"mcp:{mission['mission_id']}:{evidence_id}"
+            for evidence_id in expected_source_ids
+        }
+        assert len(opencrab_evidence) == 24
+        assert {str(row["evidence_id"]) for row in opencrab_evidence} == expected_ledger_ids
+        context_artifact = next(
+            row
+            for row in detail["artifacts"]
+            if str(row.get("kind") or "") == "mcp_context_receipt"
+        )
+        receipt_payload = json.loads(Path(str(context_artifact["path"])).read_text(encoding="utf-8"))
+        assert receipt_payload["evidence_count"] == 23
+        primary = next(row for row in receipt_payload["evidence"] if row["id"] == "ev-00")
+        assert primary["duplicate_ids"] == ["ev-01"]
     finally:
         server.server_close()
         if paths["socket"].exists():

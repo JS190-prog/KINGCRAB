@@ -22,7 +22,8 @@ _CACHE_MAX_ENTRIES = 64
 # silently dropping the tail of a user's selection.
 _MCP_PACK_BATCH_LIMIT = 25
 _MAX_EXPLICIT_PACKAGES = 500
-_CACHE_REVISION = "gateway-graph-handoff-v2"
+_MAX_PERSISTED_EVIDENCE_ROWS = 32
+_CACHE_REVISION = "evidence-ledger-v3"
 
 
 def _list_value(payload: Any, *keys: str) -> List[Dict[str, Any]]:
@@ -74,11 +75,12 @@ def _model_evidence(receipt: Dict[str, Any], limit: int = 4) -> List[Dict[str, A
     model-facing projection should not spend context on duplicate chunks or
     unrelated pack updates that happened to rank nearby in a broad query.
     """
-    rows = [row for row in (receipt.get("evidence") or [])[:8] if isinstance(row, dict)]
+    rows = [row for row in (receipt.get("evidence") or []) if isinstance(row, dict)]
     query_terms = {
         token
         for token in re.findall(r"[0-9A-Za-z가-힣]{2,}", str(receipt.get("query") or "").lower())
     }
+    positions = {id(row): index for index, row in enumerate(rows)}
 
     def rank(row: Dict[str, Any]) -> tuple[float, int]:
         text = str(row.get("text") or "").lower()
@@ -89,31 +91,76 @@ def _model_evidence(receipt: Dict[str, Any], limit: int = 4) -> List[Dict[str, A
             score = float(raw_score or 0)
         except (TypeError, ValueError):
             score = 0.0
-        return (float(overlap) + min(max(score, 0.0), 1.0) / 1000.0, -rows.index(row))
+        return (
+            float(overlap) + min(max(score, 0.0), 1.0) / 1000.0,
+            -positions.get(id(row), 0),
+        )
 
+    ranked = sorted(rows, key=rank, reverse=True)
+    target = max(1, int(limit))
     selected: List[Dict[str, Any]] = []
     seen_text: set[str] = set()
-    for row in sorted(rows, key=rank, reverse=True):
-        identity = " ".join(str(row.get("text") or "").split()).lower()
+
+    def append_unique(row: Dict[str, Any]) -> bool:
+        lane_id = str(row.get("lane_id") or "").strip().lower()
+        normalized_text = " ".join(str(row.get("text") or "").split()).lower()
+        identity = "%s|%s" % (lane_id, normalized_text) if lane_id else normalized_text
         if identity and identity in seen_text:
-            continue
+            return False
         if identity:
             seen_text.add(identity)
         selected.append(copy.deepcopy(row))
-        if len(selected) >= max(1, int(limit)):
+        return True
+
+    lane_order: List[str] = []
+    lane_buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for row in ranked:
+        lane_id = str(row.get("lane_id") or "").strip()
+        if not lane_id:
+            continue
+        if lane_id not in lane_buckets:
+            lane_order.append(lane_id)
+            lane_buckets[lane_id] = []
+        lane_buckets[lane_id].append(row)
+
+    # When a Gateway request contains independent evidence lanes, keep the
+    # smallest model projection balanced across those lanes. This prevents a
+    # policy lane at the head of the receipt from crowding out the work lane.
+    if len(lane_order) > 1:
+        while len(selected) < target:
+            progressed = False
+            for lane_id in lane_order:
+                bucket = lane_buckets[lane_id]
+                while bucket:
+                    if append_unique(bucket.pop(0)):
+                        progressed = True
+                        break
+                if len(selected) >= target:
+                    break
+            if not progressed:
+                break
+
+    for row in ranked:
+        if len(selected) >= target:
             break
+        append_unique(row)
     return selected
 
 
-def _normalize_evidence(rows: List[Dict[str, Any]], limit: int = 8, query: str = "") -> List[Dict[str, Any]]:
+def _normalize_evidence(
+    rows: List[Dict[str, Any]],
+    limit: int = _MAX_PERSISTED_EVIDENCE_ROWS,
+    query: str = "",
+) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     seen: set[str] = set()
     seen_content: Dict[str, int] = {}
     for item in rows:
         evidence_id = _text(item.get("id") or item.get("evidence_id"), 240)
-        source = _text(item.get("source"), 500)
+        source = _text(item.get("source") or item.get("source_uri") or item.get("source_url"), 500)
         text = _text(item.get("text") or item.get("content"))
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        lane_id = _text(item.get("lane_id") or metadata.get("lane_id"), 120)
         # Marketplace imports can expose the same source chunk under multiple
         # evidence IDs. Keep one model-facing row, but retain every observed
         # ID for auditability. Different sources are never merged solely
@@ -122,7 +169,12 @@ def _normalize_evidence(rows: List[Dict[str, Any]], limit: int = 8, query: str =
             _text(item.get(key) or metadata.get(key), 120)
             for key in ("document_id", "char_start", "char_end", "source_url")
         ).strip("|")
-        content_key = "%s|%s|%s" % (source.lower(), location.lower(), text.lower())
+        content_key = "%s|%s|%s|%s" % (
+            lane_id.lower(),
+            source.lower(),
+            location.lower(),
+            text.lower(),
+        )
         fallback_key = "%s|%s" % (source, text)
         identity = evidence_id or fallback_key
         if content_key in seen_content:
@@ -135,18 +187,48 @@ def _normalize_evidence(rows: List[Dict[str, Any]], limit: int = 8, query: str =
             continue
         seen.add(identity)
         seen_content[content_key] = len(result)
-        result.append({
+        normalized: Dict[str, Any] = {
             "id": evidence_id,
-            "document_id": _text(item.get("document_id"), 240),
-            "workspace_id": _text(item.get("workspace_id"), 240),
+            "document_id": _text(item.get("document_id") or metadata.get("document_id"), 240),
+            "project_id": _text(item.get("project_id") or metadata.get("project_id"), 240),
+            "workspace_id": _text(item.get("workspace_id") or metadata.get("workspace_id"), 240),
             "package_id": _text(item.get("package_id") or metadata.get("package_id") or metadata.get("pack_id"), 240),
             "text": text,
             "score": item.get("score"),
             "source": source or ("opencrab://evidence/%s" % evidence_id if evidence_id else ""),
+            "source_url": _text(item.get("source_url") or metadata.get("source_url"), 1000),
             "created_at": item.get("created_at"),
+            "lane_id": lane_id,
+            "lane_purpose": _text(item.get("lane_purpose") or metadata.get("lane_purpose"), 120),
+            "profile_id": _text(item.get("profile_id") or metadata.get("profile_id"), 120),
+            "configured_workspace_id": _text(
+                item.get("configured_workspace_id") or metadata.get("configured_workspace_id"),
+                240,
+            ),
+            "claim_scope": _text(item.get("claim_scope") or metadata.get("claim_scope"), 240),
             "metadata": metadata,
             "retrieval": item.get("retrieval") if isinstance(item.get("retrieval"), dict) else {},
-        })
+        }
+        raw_lane_workspace_ids = item.get("lane_workspace_ids") or metadata.get("lane_workspace_ids") or []
+        if not isinstance(raw_lane_workspace_ids, list):
+            raw_lane_workspace_ids = []
+        lane_workspace_ids = [
+            _text(value, 240)
+            for value in raw_lane_workspace_ids
+            if _text(value, 240)
+        ][:8]
+        if lane_workspace_ids:
+            normalized["lane_workspace_ids"] = list(dict.fromkeys(lane_workspace_ids))
+        provenance = item.get("provenance")
+        if isinstance(provenance, dict):
+            normalized["provenance"] = copy.deepcopy(provenance)
+        elif isinstance(provenance, str) and provenance.strip():
+            normalized["provenance"] = _text(provenance, 500)
+        for key in ("char_start", "char_end", "source_chunk_index", "full_chunk_count", "evidence_index"):
+            value = item.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                normalized[key] = value
+        result.append(normalized)
     query_terms = {
         token
         for token in re.findall(r"[0-9A-Za-z가-힣]{2,}", str(query or "").lower())
@@ -1130,6 +1212,14 @@ def compact_context(receipt: Dict[str, Any], max_chars: int = 4200) -> str:
         "evidence": [
             {
                 "id": row.get("id"),
+                "document_id": row.get("document_id"),
+                "project_id": row.get("project_id"),
+                "package_id": row.get("package_id"),
+                "workspace_id": row.get("workspace_id"),
+                "lane_id": row.get("lane_id"),
+                "lane_purpose": row.get("lane_purpose"),
+                "profile_id": row.get("profile_id"),
+                "claim_scope": row.get("claim_scope"),
                 "source": _text(row.get("source"), 180),
                 "text": _text(row.get("text"), 480),
             }

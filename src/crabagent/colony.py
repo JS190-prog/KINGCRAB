@@ -2417,25 +2417,32 @@ class ColonyExecutor:
                     "semantic_path_count": (receipt.get("quality") or {}).get("evidence_backed_preferred_relation_path_count", 0),
                 },
             )
+        registered_evidence_ids: set[str] = set()
         for index, row in enumerate(evidence_rows, start=1):
             if not isinstance(row, dict):
                 continue
-            evidence_id = row.get("id") or "mcp-evidence-%s" % index
-            source_uri = row.get("source") or "opencrab://evidence/%s" % evidence_id
-            self.store.add_evidence(
-                EvidenceRef(
-                    # OpenCrab evidence IDs are stable across missions. The
-                    # local evidence table has a global primary key, so keep
-                    # the source ID in the URI/receipt and namespace storage
-                    # IDs by mission to avoid cross-mission collisions.
-                    evidence_id="mcp:%s:%s" % (mission_id, evidence_id),
-                    mission_id=mission_id,
-                    artifact_id=artifact.artifact_id,
-                    source_type="opencrab_mcp_evidence",
-                    source_uri=str(source_uri),
-                    digest=artifact.sha256,
+            primary_id = str(row.get("id") or "").strip() or "mcp-evidence-%s" % index
+            duplicate_ids = row.get("duplicate_ids") if isinstance(row.get("duplicate_ids"), list) else []
+            source_ids = [primary_id, *[str(value).strip() for value in duplicate_ids if str(value).strip()]]
+            source_uri = str(row.get("source") or row.get("source_url") or "").strip()
+            for evidence_id in source_ids:
+                if evidence_id in registered_evidence_ids:
+                    continue
+                registered_evidence_ids.add(evidence_id)
+                self.store.add_evidence(
+                    EvidenceRef(
+                        # OpenCrab evidence IDs are stable across missions. The
+                        # local evidence table has a global primary key, so keep
+                        # the source ID in the URI/receipt and namespace storage
+                        # IDs by mission to avoid cross-mission collisions.
+                        evidence_id="mcp:%s:%s" % (mission_id, evidence_id),
+                        mission_id=mission_id,
+                        artifact_id=artifact.artifact_id,
+                        source_type="opencrab_mcp_evidence",
+                        source_uri=source_uri or "opencrab://evidence/%s" % evidence_id,
+                        digest=artifact.sha256,
+                    )
                 )
-            )
         nodes = receipt.get("nodes") if isinstance(receipt.get("nodes"), list) else []
         for node in nodes[:12]:
             if not isinstance(node, dict) or not node.get("id"):

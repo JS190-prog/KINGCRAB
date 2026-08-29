@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 import json
 
 from crabagent.opencrab import OpenCrabUnavailable
-from crabagent.ontology_context import OntologyContextCollector, compact_context
+from crabagent.ontology_context import OntologyContextCollector, _model_evidence, compact_context
 
 
 def test_context_receipt_preserves_structured_transient_tool_failure() -> None:
@@ -86,6 +86,76 @@ def test_duplicate_evidence_ids_are_collapsed_before_persistence() -> None:
     receipt = OntologyContextCollector(call_tool).collect("deduplicate evidence")
     assert receipt["evidence_count"] == 2
     assert [row["id"] for row in receipt["evidence"]] == ["same", "other"]
+
+
+def test_context_receipt_preserves_24_lane_evidence_while_model_projection_stays_bounded() -> None:
+    rows = []
+    expected_ids = set()
+    for index in range(24):
+        lane_id = "persona_policy" if index % 2 == 0 else "actual_work"
+        evidence_id = f"ev-{index:02d}"
+        expected_ids.add(evidence_id)
+        rows.append(
+            {
+                "id": evidence_id,
+                "document_id": f"doc-{index:02d}",
+                "project_id": "project-policy" if lane_id == "persona_policy" else "project-work",
+                "workspace_id": "workspace-main" if lane_id == "persona_policy" else "workspace-facility",
+                "package_id": "pack-policy" if lane_id == "persona_policy" else f"pack-work-{index:02d}",
+                "source_uri": f"opencrab://evidence/{evidence_id}",
+                "content": f"소방 업무 근거 후보 {index:02d}",
+                "lane_id": lane_id,
+                "lane_purpose": "policy_only" if lane_id == "persona_policy" else "personal_work_evidence",
+                "profile_id": "main" if lane_id == "persona_policy" else "facility-management",
+                "configured_workspace_id": "workspace-main" if lane_id == "persona_policy" else "workspace-facility",
+                "lane_workspace_ids": [
+                    "workspace-main" if lane_id == "persona_policy" else "workspace-facility"
+                ],
+                "claim_scope": (
+                    "policy_only_no_personal_fact_promotion"
+                    if lane_id == "persona_policy"
+                    else "personal_role_confirmation_required"
+                ),
+                "char_start": index * 100,
+                "char_end": index * 100 + 20,
+            }
+        )
+
+    def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        assert name == "opencrab_query"
+        assert arguments["top_k"] == 8
+        return {"status": "ok", "evidence": rows}
+
+    receipt = OntologyContextCollector(call_tool).collect("소방 업무 근거 후보표")
+
+    assert receipt["evidence_count"] == 24
+    assert {row["id"] for row in receipt["evidence"]} == expected_ids
+    actual_work = next(row for row in receipt["evidence"] if row["id"] == "ev-01")
+    assert actual_work["document_id"] == "doc-01"
+    assert actual_work["project_id"] == "project-work"
+    assert actual_work["package_id"] == "pack-work-01"
+    assert actual_work["workspace_id"] == "workspace-facility"
+    assert actual_work["lane_id"] == "actual_work"
+    assert actual_work["lane_purpose"] == "personal_work_evidence"
+    assert actual_work["profile_id"] == "facility-management"
+    assert actual_work["claim_scope"] == "personal_role_confirmation_required"
+    assert actual_work["lane_workspace_ids"] == ["workspace-facility"]
+
+    projected = _model_evidence(receipt, limit=4)
+    assert len(projected) == 4
+    assert [row["lane_id"] for row in projected] == [
+        "persona_policy",
+        "actual_work",
+        "persona_policy",
+        "actual_work",
+    ]
+    compact = compact_context(receipt, max_chars=4200)
+    assert len(compact) <= 4200
+    compact_payload = json.loads(compact)
+    assert {row["lane_id"] for row in compact_payload["evidence"]} == {
+        "persona_policy",
+        "actual_work",
+    }
 
 
 def test_typed_catalog_rows_are_observations_not_claim_evidence() -> None:
