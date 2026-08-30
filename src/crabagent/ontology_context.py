@@ -23,7 +23,7 @@ _CACHE_MAX_ENTRIES = 64
 _MCP_PACK_BATCH_LIMIT = 25
 _MAX_EXPLICIT_PACKAGES = 500
 _MAX_PERSISTED_EVIDENCE_ROWS = 32
-_CACHE_REVISION = "evidence-ledger-v3"
+_CACHE_REVISION = "snapshot-provenance-v4"
 
 
 def _list_value(payload: Any, *keys: str) -> List[Dict[str, Any]]:
@@ -66,6 +66,144 @@ def _first_value(item: Dict[str, Any], properties: Dict[str, Any], nested: Dict[
 
 def _text(value: Any, limit: int = 1200) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def _bounded_string_list(value: Any, limit: int, item_limit: int = 512) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    result: List[str] = []
+    for item in value:
+        text = _text(item, item_limit)
+        if text and text not in result:
+            result.append(text)
+        if len(result) >= max(0, int(limit)):
+            break
+    return result
+
+
+def _bounded_gateway_receipt_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Preserve authenticated Gateway provenance without copying model prose."""
+    if not isinstance(payload, dict):
+        return {}
+    result: Dict[str, Any] = {}
+
+    raw_lanes = payload.get("lanes")
+    if isinstance(raw_lanes, list):
+        lanes: List[Dict[str, Any]] = []
+        for raw_lane in raw_lanes[:8]:
+            if not isinstance(raw_lane, dict):
+                continue
+            lane: Dict[str, Any] = {}
+            for key, limit in (
+                ("lane_id", 120),
+                ("purpose", 120),
+                ("claim_scope", 240),
+                ("profile_id", 120),
+                ("configured_workspace_id", 240),
+                ("status", 80),
+            ):
+                value = _text(raw_lane.get(key), limit)
+                if value:
+                    lane[key] = value
+            for key, limit in (
+                ("workspace_ids", 64),
+                ("project_ids", 64),
+                ("package_ids", 256),
+                ("evidence_ids", 256),
+            ):
+                values = _bounded_string_list(raw_lane.get(key), limit)
+                if values:
+                    lane[key] = values
+            if "complete" in raw_lane:
+                lane["complete"] = bool(raw_lane.get("complete"))
+            evidence_count = raw_lane.get("evidence_count")
+            if isinstance(evidence_count, int) and not isinstance(evidence_count, bool):
+                lane["evidence_count"] = max(0, evidence_count)
+            if lane:
+                lanes.append(lane)
+        if lanes:
+            result["lanes"] = lanes
+
+    raw_policy = payload.get("lane_policy")
+    if isinstance(raw_policy, dict):
+        lane_policy = {
+            key: _text(raw_policy.get(key), 120)
+            for key in (
+                "cross_lane_claim_promotion",
+                "policy_only_personal_fact",
+                "failed_lane_compensation",
+            )
+            if _text(raw_policy.get(key), 120)
+        }
+        if lane_policy:
+            result["lane_policy"] = lane_policy
+
+    raw_snapshot = payload.get("evidence_snapshot")
+    if isinstance(raw_snapshot, dict):
+        snapshot: Dict[str, Any] = {}
+        for key, limit in (
+            ("schema", 120),
+            ("digest", 128),
+            ("request_digest", 128),
+        ):
+            value = _text(raw_snapshot.get(key), limit)
+            if value:
+                snapshot[key] = value
+        if "complete" in raw_snapshot:
+            snapshot["complete"] = bool(raw_snapshot.get("complete"))
+        evidence_count = raw_snapshot.get("evidence_count")
+        if isinstance(evidence_count, int) and not isinstance(evidence_count, bool):
+            snapshot["evidence_count"] = max(0, evidence_count)
+        for key, limit in (
+            ("evidence_ids", 256),
+            ("lane_ids", 8),
+            ("project_ids", 64),
+            ("package_ids", 256),
+            ("workspace_ids", 64),
+        ):
+            values = _bounded_string_list(raw_snapshot.get(key), limit)
+            if values:
+                snapshot[key] = values
+        if snapshot:
+            result["evidence_snapshot"] = snapshot
+
+    raw_binding = payload.get("evidence_snapshot_binding")
+    if isinstance(raw_binding, dict):
+        binding: Dict[str, Any] = {}
+        for key, limit in (
+            ("status", 80),
+            ("expected_digest", 128),
+            ("observed_digest", 128),
+        ):
+            value = _text(raw_binding.get(key), limit)
+            if value:
+                binding[key] = value
+        if "required" in raw_binding:
+            binding["required"] = bool(raw_binding.get("required"))
+        evidence_count = raw_binding.get("evidence_count")
+        if isinstance(evidence_count, int) and not isinstance(evidence_count, bool):
+            binding["evidence_count"] = max(0, evidence_count)
+        if binding:
+            result["evidence_snapshot_binding"] = binding
+
+    raw_handoff = payload.get("handoff")
+    if isinstance(raw_handoff, dict):
+        handoff: Dict[str, Any] = {}
+        schema = _text(raw_handoff.get("schema"), 120)
+        if schema:
+            handoff["schema"] = schema
+        for key in (
+            "source_evidence_count",
+            "transmitted_evidence_count",
+            "text_char_limit_per_evidence",
+            "context_limit_bytes",
+        ):
+            value = raw_handoff.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                handoff[key] = max(0, value)
+        if handoff:
+            result["handoff"] = handoff
+    return result
 
 
 def _model_evidence(receipt: Dict[str, Any], limit: int = 4) -> List[Dict[str, Any]]:
@@ -219,6 +357,22 @@ def _normalize_evidence(
         ][:8]
         if lane_workspace_ids:
             normalized["lane_workspace_ids"] = list(dict.fromkeys(lane_workspace_ids))
+        for field, field_limit in (
+            ("package_id_candidates", 25),
+            ("workspace_id_candidates", 8),
+        ):
+            values = _bounded_string_list(item.get(field) or metadata.get(field), field_limit, 240)
+            if values:
+                normalized[field] = values
+        raw_scope_binding = item.get("scope_binding") or metadata.get("scope_binding")
+        if isinstance(raw_scope_binding, dict):
+            scope_binding = {
+                key: _text(raw_scope_binding.get(key), 64)
+                for key in ("package_id", "workspace_id")
+                if _text(raw_scope_binding.get(key), 64)
+            }
+            if scope_binding:
+                normalized["scope_binding"] = scope_binding
         provenance = item.get("provenance")
         if isinstance(provenance, dict):
             normalized["provenance"] = copy.deepcopy(provenance)
@@ -974,6 +1128,7 @@ class OntologyContextCollector:
             "cache_hit": False,
             "cache_key": cache_key,
         }
+        receipt.update(_bounded_gateway_receipt_metadata(query_payload))
         cacheable_graph = not graph_required or receipt.get("graph_gate") == "pass"
         if self.cache_path is not None and receipt["status"] == "ok" and receipt["claim_gate"] == "pass" and cacheable_graph:
             self._write_cache(cache_key, receipt)

@@ -158,6 +158,166 @@ def test_context_receipt_preserves_24_lane_evidence_while_model_projection_stays
     }
 
 
+def test_gateway_snapshot_provenance_survives_receipt_and_cache_without_expanding_model_context(tmp_path: Path) -> None:
+    digest = "a" * 64
+    request_digest = "b" * 64
+    calls = []
+    evidence = [
+        {
+            "id": "ev-policy",
+            "document_id": "doc-policy",
+            "project_id": "project-policy",
+            "package_id": "pack-policy",
+            "workspace_id": "workspace-main",
+            "content": "policy evidence",
+            "source": "opencrab://evidence/ev-policy",
+            "lane_id": "persona_policy",
+            "lane_purpose": "policy_only",
+            "profile_id": "main",
+            "configured_workspace_id": "workspace-main",
+            "lane_workspace_ids": ["workspace-main"],
+            "claim_scope": "policy_only_no_personal_fact_promotion",
+            "package_id_candidates": ["pack-policy"],
+            "workspace_id_candidates": ["workspace-main"],
+            "scope_binding": {
+                "package_id": "single_lane_scope",
+                "workspace_id": "configured_profile",
+            },
+        },
+        {
+            "id": "ev-work",
+            "document_id": "doc-work",
+            "project_id": "project-work",
+            "package_id": "pack-work",
+            "workspace_id": "workspace-facility",
+            "content": "actual work evidence",
+            "source": "opencrab://evidence/ev-work",
+            "lane_id": "actual_work",
+            "lane_purpose": "personal_work_evidence",
+            "profile_id": "facility-management",
+            "configured_workspace_id": "workspace-facility",
+            "lane_workspace_ids": ["workspace-facility"],
+            "claim_scope": "personal_role_confirmation_required",
+            "package_id_candidates": ["pack-work"],
+            "workspace_id_candidates": ["workspace-facility"],
+            "scope_binding": {
+                "package_id": "single_lane_scope",
+                "workspace_id": "configured_profile",
+            },
+        },
+    ]
+    lanes = [
+        {
+            "lane_id": "persona_policy",
+            "purpose": "policy_only",
+            "claim_scope": "policy_only_no_personal_fact_promotion",
+            "profile_id": "main",
+            "configured_workspace_id": "workspace-main",
+            "workspace_ids": ["workspace-main"],
+            "project_ids": ["project-policy"],
+            "package_ids": ["pack-policy"],
+            "evidence_ids": ["ev-policy"],
+            "status": "ok",
+            "complete": True,
+            "evidence_count": 1,
+        },
+        {
+            "lane_id": "actual_work",
+            "purpose": "personal_work_evidence",
+            "claim_scope": "personal_role_confirmation_required",
+            "profile_id": "facility-management",
+            "configured_workspace_id": "workspace-facility",
+            "workspace_ids": ["workspace-facility"],
+            "project_ids": ["project-work"],
+            "package_ids": ["pack-work"],
+            "evidence_ids": ["ev-work"],
+            "status": "ok",
+            "complete": True,
+            "evidence_count": 1,
+        },
+    ]
+    snapshot = {
+        "schema": "opencrab_evidence_snapshot/v1",
+        "digest": digest,
+        "request_digest": request_digest,
+        "complete": True,
+        "evidence_count": 2,
+        "evidence_ids": ["ev-policy", "ev-work"],
+        "lane_ids": ["actual_work", "persona_policy"],
+        "project_ids": ["project-policy", "project-work"],
+        "package_ids": ["pack-policy", "pack-work"],
+        "workspace_ids": ["workspace-facility", "workspace-main"],
+    }
+    binding = {
+        "status": "verified",
+        "required": True,
+        "expected_digest": digest,
+        "observed_digest": digest,
+        "evidence_count": 2,
+    }
+    handoff = {
+        "schema": "opencrab_runtime_context/v2",
+        "source_evidence_count": 2,
+        "transmitted_evidence_count": 2,
+        "text_char_limit_per_evidence": 640,
+        "context_limit_bytes": 65536,
+    }
+
+    def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        calls.append((name, dict(arguments)))
+        assert name == "opencrab_query"
+        return {
+            "status": "ok",
+            "authority": "gateway_verified_mcp_response",
+            "evidence": evidence,
+            "lanes": lanes,
+            "lane_policy": {
+                "cross_lane_claim_promotion": "forbidden",
+                "policy_only_personal_fact": "forbidden",
+                "failed_lane_compensation": "forbidden",
+            },
+            "evidence_snapshot": snapshot,
+            "evidence_snapshot_binding": binding,
+            "handoff": handoff,
+        }
+
+    cache_path = tmp_path / "ontology-context-cache.json"
+    collector = OntologyContextCollector(call_tool, cache_path=cache_path)
+    receipt = collector.collect("snapshot provenance audit")
+
+    assert receipt["authority"] == "gateway_verified_mcp_response"
+    assert receipt["lanes"] == lanes
+    assert receipt["lane_policy"]["cross_lane_claim_promotion"] == "forbidden"
+    assert receipt["evidence_snapshot"] == snapshot
+    assert receipt["evidence_snapshot_binding"] == binding
+    assert receipt["handoff"] == handoff
+    evidence_by_id = {row["id"]: row for row in receipt["evidence"]}
+    assert evidence_by_id["ev-policy"]["package_id_candidates"] == ["pack-policy"]
+    assert evidence_by_id["ev-policy"]["workspace_id_candidates"] == ["workspace-main"]
+    assert evidence_by_id["ev-policy"]["scope_binding"] == {
+        "package_id": "single_lane_scope",
+        "workspace_id": "configured_profile",
+    }
+    assert evidence_by_id["ev-work"]["scope_binding"]["workspace_id"] == "configured_profile"
+
+    cached = collector.collect("snapshot provenance audit")
+    assert len(calls) == 1
+    assert cached["cache_hit"] is True
+    assert cached["lanes"] == lanes
+    assert cached["evidence_snapshot"] == snapshot
+    assert cached["evidence_snapshot_binding"] == binding
+    assert cached["handoff"] == handoff
+
+    projected = _model_evidence(cached, limit=2)
+    assert len(projected) == 2
+    assert {row["lane_id"] for row in projected} == {"persona_policy", "actual_work"}
+    assert all("evidence_snapshot" not in row for row in projected)
+    compact = compact_context(cached, max_chars=4200)
+    assert len(compact) <= 4200
+    compact_payload = json.loads(compact)
+    assert len(compact_payload["evidence"]) <= 4
+
+
 def test_typed_catalog_rows_are_observations_not_claim_evidence() -> None:
     def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         assert name == "opencrab_query"
