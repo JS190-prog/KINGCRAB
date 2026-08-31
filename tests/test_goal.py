@@ -167,6 +167,35 @@ def test_connected_opencrab_does_not_intercept_plain_code_edit() -> None:
     assert interaction_kind("Create hello.txt with one exact line", knowledge_available=True) == "colony"
 
 
+def test_local_mcpworld_media_execution_does_not_require_opencrab() -> None:
+    objective = (
+        "Kingcrab MCP를 사용해 MCPWorld 홍보영상 폴더의 1~4번 로컬 영상만으로 "
+        "최고의 홍보 영상을 만들 계획을 작성하고 제작해. "
+        "OpenCrab과 외부 근거는 필요하지 않다."
+    )
+
+    plan = classify_goal(objective, knowledge_available=True, forced="colony")
+
+    assert plan.kind == "code_execution"
+    assert plan.ontology_required is False
+    assert plan.external_scouting is False
+    assert plan.stages == ["KING", "WORKER", "ORACLE"]
+    assert "QUEEN" not in plan.stages
+    assert "opencrab_mcp_context_receipt_observed" not in plan.acceptance_checks
+
+
+def test_explicit_opencrab_media_evidence_request_keeps_ontology_route() -> None:
+    plan = classify_goal(
+        "OpenCrab 근거로 MCPWorld 홍보영상 구성 전략을 추천해줘.",
+        knowledge_available=True,
+        forced="colony",
+    )
+
+    assert plan.ontology_required is True
+    assert "QUEEN" in plan.stages
+    assert "opencrab_mcp_context_receipt_observed" in plan.acceptance_checks
+
+
 def test_ontology_goal_builds_a_kinetic_evidence_path(tmp_path: Path) -> None:
     objective = "오픈크랩 팩을 조회해서 목표중심 워크플로우의 근거를 요약해줘"
     plan = classify_goal(objective)

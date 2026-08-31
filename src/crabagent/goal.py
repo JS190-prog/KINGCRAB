@@ -14,7 +14,6 @@ ONTOLOGY_SIGNALS = (
     "rag",
     "evidence",
     "schema",
-    "mcp",
     "온톨로지",
     "오픈크랩",
     "지식 그래프",
@@ -136,7 +135,7 @@ NEGATED_SCOPE_CONTEXTS = (
     r"\b(?:no|without|never|avoid)\s+external\s+(?:changes?|mutations?|writes?)\b",
     # Korean equivalents, including phrases such as '오픈크랩을 사용하지 말고'.
     r"외부\s*(?:변경|상태|데이터)\s*(?:금지|하지\s*마|하지\s*말|하지\s*않)",
-    r"(?:오픈크랩|온톨로지|지식\s*그래프|근거|팩|웹|인터넷|외부\s*서비스|브라우저|검색|조사)[^.!?;\n]{0,60}(?:사용하지|접근하지|조회하지|검색하지|조사하지|쓰지|말고|않고|없이|금지)[^.!?;\n]*",
+    r"(?:opencrab|오픈크랩|온톨로지|지식\s*그래프|근거|팩|웹|인터넷|외부\s*(?:근거|서비스)?|브라우저|검색|조사)[^.!?;\n]{0,60}(?:사용하지|접근하지|조회하지|검색하지|조사하지|쓰지|말고|않고|없이|금지|불필요|필요\s*(?:없|하지\s*않))[^.!?;\n]*",
 )
 
 READ_ONLY_CHANGE_CONTEXTS = (
