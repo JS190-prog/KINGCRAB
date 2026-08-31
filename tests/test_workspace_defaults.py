@@ -10,4 +10,5 @@ def test_tb_work_root_is_stable_and_not_the_old_benchmark_scratch_path() -> None
     assert default_workspace() == expected
     assert expected.name == "opencrab_packs"
     assert is_legacy_tb_scratch_root(r"C:\scratch\FINAL-Bench-TB-S1")
+    assert is_legacy_tb_scratch_root("/scratch/FINAL-Bench-TB-S1")
     assert not is_legacy_tb_scratch_root(expected)

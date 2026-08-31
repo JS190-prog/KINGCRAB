@@ -1,6 +1,6 @@
 """Stable local workspace defaults for TB missions."""
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 # Keep the TB source/work root independent from the directory that happened to
@@ -12,7 +12,8 @@ TB_WORK_ROOT = Path.home() / "Downloads" / "opencrab_packs"
 def is_legacy_tb_scratch_root(value: object) -> bool:
     """Identify the former benchmark scratch default without matching projects."""
 
-    path = Path(str(value or "")).expanduser()
+    raw = str(value or "")
+    path = PureWindowsPath(raw) if "\\" in raw else Path(raw).expanduser()
     return path.name.casefold() == "final-bench-tb-s1" and path.parent.name.casefold() == "scratch"
 
 
