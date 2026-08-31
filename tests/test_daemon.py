@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from crabagent.daemon import RuntimeServer, _king_title, _mcp_policy_with
+from crabagent.models import MissionContract, MissionStatus, Role, TaskSlot
 from crabagent.protocol import DaemonClient, USE_UNIX_SOCKET, runtime_paths, start_daemon
 
 
@@ -432,6 +433,133 @@ def test_zero_model_mission_uses_preloaded_opencrab_context_without_runtime_endp
         assert receipt_payload["evidence_count"] == 23
         primary = next(row for row in receipt_payload["evidence"] if row["id"] == "ev-00")
         assert primary["duplicate_ids"] == ["ev-01"]
+    finally:
+        server.server_close()
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
+def _seed_failed_retry_mission(
+    server: RuntimeServer,
+    session_id: str,
+    mission_id: str,
+    receipt_content: str,
+) -> None:
+    contract = MissionContract(
+        mission_id=mission_id,
+        objective="오픈크랩 근거를 바탕으로 결과를 검증해",
+        acceptance=["evidence receipt is preserved"],
+        workspace=str(server.workspace),
+        risk="strategic",
+        max_attempts=1,
+        max_workers=1,
+        token_budget=1000,
+    )
+    server.service.store.create_mission(contract, session_id=session_id)
+    server.service.store.add_task(
+        TaskSlot(
+            task_id="task-queen",
+            mission_id=mission_id,
+            title="Retrieve OpenCrab evidence",
+            role=Role.QUEEN,
+            position=1,
+            output_contract="opencrab_context.json",
+        )
+    )
+    server.service.store.transition_mission(mission_id, MissionStatus.PLANNED, Role.KING)
+    server.service.store.transition_mission(mission_id, MissionStatus.RUNNING, Role.KING)
+    server.service._write_artifact(
+        mission_id,
+        "task-queen",
+        "opencrab_context.json",
+        receipt_content,
+        "mcp_context_receipt",
+    )
+    server.service.store.transition_mission(mission_id, MissionStatus.FAILED, Role.ORACLE)
+
+
+def test_retry_reuses_persisted_opencrab_context_without_live_mcp(tmp_path: Path, monkeypatch) -> None:
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    server = RuntimeServer(tmp_path, paths["socket"])
+    try:
+        session = server.service.store.create_session(interaction_mode="colony")
+        receipt = {
+            "status": "ok",
+            "authority": "gateway_verified_mcp_response",
+            "evidence": [
+                {
+                    "id": "ev-retry-1",
+                    "text": "persisted retry evidence",
+                    "source": "opencrab://evidence/ev-retry-1",
+                }
+            ],
+            "evidence_count": 1,
+            "claim_gate": "pass",
+            "graph_gate": "not_required",
+            "quality": {"evidence_count": 1, "usable_evidence_count": 1},
+            "tool_calls": [],
+        }
+        source_mission_id = "mission-retry-opencrab-context"
+        _seed_failed_retry_mission(
+            server,
+            session["session_id"],
+            source_mission_id,
+            json.dumps(receipt, ensure_ascii=False),
+        )
+        captured = {}
+
+        def launch(current_session, objective, **kwargs):
+            captured["session_id"] = current_session["session_id"]
+            captured["objective"] = objective
+            captured.update(kwargs)
+            return {
+                "session_id": current_session["session_id"],
+                "status": "starting",
+                "interaction": "colony",
+                "objective": objective,
+                "retry_of": kwargs.get("retry_of"),
+            }
+
+        monkeypatch.setattr(server, "_launch_colony", launch)
+        result = server._retry_last_mission(session)
+
+        assert result["status"] == "starting"
+        assert captured["retry_of"] == source_mission_id
+        assert captured["preloaded_opencrab_context"] == receipt
+        event = next(
+            row
+            for row in server.service.store.events(source_mission_id)
+            if row.event_type == "mission_retry_requested"
+        )
+        assert event.payload["opencrab_context_reused"] is True
+        assert event.payload["opencrab_context_status"] == "ok"
+        assert event.payload["opencrab_evidence_count"] == 1
+    finally:
+        server.server_close()
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
+def test_retry_fails_closed_when_persisted_opencrab_receipt_is_unreadable(tmp_path: Path, monkeypatch) -> None:
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    server = RuntimeServer(tmp_path, paths["socket"])
+    try:
+        session = server.service.store.create_session(interaction_mode="colony")
+        _seed_failed_retry_mission(
+            server,
+            session["session_id"],
+            "mission-retry-unreadable-context",
+            "{not-json",
+        )
+
+        def unexpected_launch(*args, **kwargs):
+            raise AssertionError("retry must not launch with an unreadable evidence receipt")
+
+        monkeypatch.setattr(server, "_launch_colony", unexpected_launch)
+        with pytest.raises(RuntimeError, match="OpenCrab context receipt is unreadable"):
+            server._retry_last_mission(session)
     finally:
         server.server_close()
         if paths["socket"].exists():

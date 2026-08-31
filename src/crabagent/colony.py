@@ -2754,6 +2754,7 @@ class ColonyExecutor:
                 "The host text channel cannot directly edit arbitrary workspace files. If this bounded task can be satisfied by exactly one mission-local text artifact, include exactly one physical line in your response using this syntax: "
                 "HOST_WORKER_ARTIFACT_V1:{\"relative_path\":\".crabagent/artifacts/<safe-name>.md\",\"content\":\"<UTF-8 text with JSON escapes>\"}. "
                 "Only a direct-child .md, .txt, or .json artifact is supported, maximum 16 KiB, and existing files are never overwritten. "
+                "Use exactly the two keys relative_path and content; do not substitute path, overwrite, or any additional key. "
                 "The directive may be indented or enclosed by a Markdown code fence, but it must remain one complete physical line and must not be wrapped in another JSON envelope. "
                 "Do not emit this directive for any other path or for a task that needs source/user/external mutation; fail closed instead."
             )
@@ -2784,10 +2785,11 @@ class ColonyExecutor:
             )
         if self._host_worker_artifact_required(role):
             compact_result += (
-                "\n\nHOST WORKER ARTIFACT CONTRACT: include exactly one one-line "
-                "HOST_WORKER_ARTIFACT_V1 JSON directive for one direct-child .md/.txt/.json under .crabagent/artifacts, max 16 KiB, no overwrite. "
-                "Indentation or a surrounding Markdown code fence is accepted, but do not wrap the directive in another JSON envelope. "
-                "If the task cannot fit that boundary, fail closed."
+                "\n\nHOST WORKER ARTIFACT CONTRACT: include exactly one complete physical line using this exact shape: "
+                "HOST_WORKER_ARTIFACT_V1:{\"relative_path\":\".crabagent/artifacts/<safe-name>.md\",\"content\":\"<UTF-8 text with JSON escapes>\"}. "
+                "Use only relative_path and content; never use path, overwrite, extra keys, or an outer JSON envelope. "
+                "The artifact must be one direct-child .md/.txt/.json under .crabagent/artifacts, max 16 KiB, and must not overwrite an existing file. "
+                "Indentation or a surrounding Markdown code fence is accepted. If the task cannot fit that boundary, fail closed."
             )
         if role is Role.QUEEN and repair_contract:
             compact_result += repair_contract

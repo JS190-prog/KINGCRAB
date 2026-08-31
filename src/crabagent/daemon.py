@@ -499,7 +499,8 @@ class RuntimeServer(_RuntimeServerBase):
         if not candidates:
             raise RuntimeError("no failed or cancelled mission is available for retry")
         source = candidates[0]
-        detail = self.service.store.inspect(str(source["mission_id"]))
+        source_mission_id = str(source["mission_id"])
+        detail = self.service.store.inspect(source_mission_id)
         changed_files = 0
         for artifact in detail.get("artifacts") or []:
             if str(artifact.get("kind") or "") != "workspace_change":
@@ -513,16 +514,54 @@ class RuntimeServer(_RuntimeServerBase):
             raise RuntimeError(
                 "retry blocked: the previous mission changed %d file(s); review the workspace or use /retry force" % changed_files
             )
+
+        context_artifacts = [
+            artifact
+            for artifact in (detail.get("artifacts") or [])
+            if str(artifact.get("kind") or "") == "mcp_context_receipt"
+        ]
+        preloaded_opencrab_context: Optional[Dict[str, Any]] = None
+        opencrab_context_status = ""
+        if context_artifacts:
+            receipt = self._artifact_payload(detail, "mcp_context_receipt")
+            if not receipt:
+                raise RuntimeError("retry blocked: previous OpenCrab context receipt is unreadable")
+            opencrab_context_status = str(receipt.get("status") or "").strip().lower()
+            if not opencrab_context_status:
+                raise RuntimeError("retry blocked: previous OpenCrab context receipt has no status")
+            if opencrab_context_status in {"ok", "no_evidence", "cached"}:
+                try:
+                    preloaded_opencrab_context = self._bounded_preloaded_opencrab_context(receipt)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "retry blocked: previous OpenCrab context receipt is invalid: %s" % exc
+                    ) from exc
+
         objective = str(source.get("objective") or "").strip()
         if not objective:
             raise RuntimeError("retry blocked: previous objective is empty")
+        reused_evidence_count = len(
+            (preloaded_opencrab_context or {}).get("evidence") or []
+        )
         self.service.store.append_event(
-            str(source["mission_id"]),
+            source_mission_id,
             "mission_retry_requested",
             "USER",
-            {"session_id": session_id, "force": bool(force), "changed_files": changed_files},
+            {
+                "session_id": session_id,
+                "force": bool(force),
+                "changed_files": changed_files,
+                "opencrab_context_reused": preloaded_opencrab_context is not None,
+                "opencrab_context_status": opencrab_context_status or None,
+                "opencrab_evidence_count": reused_evidence_count,
+            },
         )
-        return self._launch_colony(session, objective, retry_of=str(source["mission_id"]))
+        return self._launch_colony(
+            session,
+            objective,
+            retry_of=source_mission_id,
+            preloaded_opencrab_context=preloaded_opencrab_context,
+        )
 
     @staticmethod
     def _artifact_payload(detail: Dict[str, Any], kind: str) -> Dict[str, Any]:

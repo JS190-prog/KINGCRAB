@@ -401,8 +401,10 @@ def test_host_worker_prompt_always_carries_artifact_contract(tmp_path: Path) -> 
     executor.goal_plan = classify_goal("오픈크랩 근거를 바탕으로 result.txt를 만들어줘").to_dict()
     prompt = executor._prompt(Role.WORKER, executor.goal_plan["objective"], ["prior output " * 1000] * 3)
     assert "HOST WORKER ARTIFACT CONTRACT" in prompt
-    assert "HOST_WORKER_ARTIFACT_V1" in prompt
-    assert "another JSON envelope" in prompt
+    assert 'HOST_WORKER_ARTIFACT_V1:{"relative_path":".crabagent/artifacts/<safe-name>.md","content":"<UTF-8 text with JSON escapes>"}' in prompt
+    assert "Use only relative_path and content" in prompt
+    assert "never use path, overwrite, extra keys" in prompt
+    assert "outer JSON envelope" in prompt
 
 
 def test_non_mutating_worker_and_oracle_prompts_preserve_read_only_boundary() -> None:
