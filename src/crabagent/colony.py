@@ -56,7 +56,7 @@ from .store import new_id
 ROLE_INSTRUCTIONS = {
     Role.KING: "Compile the objective into an acceptance-gated workflow. Do not edit files or retrieve broad context.",
     Role.QUEEN: "Retrieve and shape only the minimum ontology path needed for this goal. Preserve evidence references and do not invent sources.",
-    Role.WORKER: "Produce only the bounded deliverable. When requires_write is false, return the requested evidence-backed result without editing workspace or external state. When requires_write is true, use the Queen handoff, preserve user changes, and run focused verification.",
+    Role.WORKER: "Produce only the bounded deliverable. When requires_write is false, return the requested evidence-backed result without editing workspace or external state. When requires_write is true, use the compiled role handoff, preserve user changes, and run focused verification.",
     Role.SOLDIER: "Patrol evidence, scope, duplicate work, and waste. Stop or quarantine only what the receipts justify.",
     Role.ORACLE: "Inspect actual artifacts, receipts, evidence and verification output. Publish a concise conclusion only when the gates pass.",
 }

@@ -9,7 +9,7 @@ from crabagent.benchmark import observed_metrics
 from crabagent.colony import ColonyExecutor
 from crabagent.goal import classify_goal
 from crabagent.kinetic_workflow import compile_kinetic_workflow
-from crabagent.kinetic_contract import compile_king_plan
+from crabagent.kinetic_contract import compact_king_plan, compile_king_plan
 from crabagent.runtime import RuntimeService
 
 
@@ -165,6 +165,36 @@ def test_king_plan_parsing_keeps_goal_graph_as_authority() -> None:
     assert king["evidence_authority"] == "opencrab_mcp_receipt_only"
     assert king["subgoals"] == ["근거 추출", "차이 비교"]
     assert king["decision_slots"] == plan.response_contract
+
+
+def test_local_mcpworld_execution_has_no_opencrab_or_queen_handoff() -> None:
+    objective = (
+        "Kingcrab MCP를 사용해 MCPWorld 홍보영상 폴더의 1~4번 로컬 영상만으로 최고의 홍보 영상을 "
+        "만들 계획을 작성하고 제작해. OpenCrab과 외부 근거는 필요하지 않다. 기존 최종 영상과 제작 계획을 "
+        "우선 검토하고, 필요한 경우에만 같은 로컬 폴더에서 개선하며 1920×1080 MP4 결과를 검증해."
+    )
+    plan = classify_goal(objective)
+    graph = {"graph_id": "goal-local-media", "decision_slots": plan.response_contract}
+
+    king = compile_king_plan(
+        objective=objective,
+        goal_plan=plan.to_dict(),
+        goal_graph=graph,
+    )
+    workflow = compile_kinetic_workflow(plan.to_dict(), graph)
+    compact = compact_king_plan(king)
+    steps = {row["id"]: row for row in workflow["steps"]}
+
+    assert plan.ontology_required is False
+    assert king["evidence_authority"] == "local_observed_receipts_only"
+    assert king["next_action"].startswith("WORKER:")
+    assert "opencrab_mcp_receipt_only" not in compact
+    assert "QUEEN:" not in compact
+    assert "patrol_quality" not in steps
+    assert steps["execute_action"]["inputs"] == ["goal_contract"]
+    assert steps["verify_result"]["inputs"] == ["goal_contract", "workspace_change"]
+    assert "local_work_never_requires_opencrab_receipts" in workflow["state_invariants"]
+    assert not any(step["role"] in {"QUEEN", "SOLDIER"} for step in workflow["steps"])
 
 
 def test_malformed_queen_handoff_gets_one_bounded_repair(tmp_path: Path) -> None:

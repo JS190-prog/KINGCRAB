@@ -110,8 +110,18 @@ def compile_king_plan(
         ]
     if not success_checks:
         success_checks = [_clean(item, 260) for item in goal_plan.get("acceptance_checks") or []][:8]
+    ontology_required = bool(goal_plan.get("ontology_required"))
     if not next_action:
-        next_action = "QUEEN: goal_graph의 evidence_slots를 채우고 decision_slots별 근거를 정리한다."
+        if ontology_required:
+            next_action = "QUEEN: goal_graph의 evidence_slots를 채우고 decision_slots별 근거를 정리한다."
+        elif "WORKER" in {str(role) for role in goal_plan.get("stages") or []}:
+            next_action = "WORKER: 사용자 범위 안에서 bounded deliverable을 만들고 검증한다."
+        else:
+            next_action = "ORACLE: 로컬 receipt와 acceptance gate를 검증한다."
+
+    evidence_authority = (
+        "opencrab_mcp_receipt_only" if ontology_required else "local_observed_receipts_only"
+    )
 
     return {
         "schema": KING_PLAN_SCHEMA,
@@ -127,7 +137,7 @@ def compile_king_plan(
         "decision_slots": [str(item) for item in graph_slots[:12]],
         "next_action": next_action,
         "scope_locked": True,
-        "evidence_authority": "opencrab_mcp_receipt_only",
+        "evidence_authority": evidence_authority,
     }
 
 
@@ -142,7 +152,7 @@ def compact_king_plan(plan: Dict[str, Any], max_chars: int = 1500) -> str:
         "decision_slots": (plan.get("decision_slots") or [])[:8],
         "next_action": plan.get("next_action"),
         "scope_locked": True,
-        "evidence_authority": "opencrab_mcp_receipt_only",
+        "evidence_authority": plan.get("evidence_authority") or "local_observed_receipts_only",
     }
     value = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return value if len(value) <= max_chars else value[: max_chars - 18] + "...[bounded]"

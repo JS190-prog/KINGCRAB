@@ -54,6 +54,8 @@ def compile_kinetic_workflow(
     requires_model_queen = bool(plan.get("requires_model_queen"))
     requires_model_planning = bool(plan.get("requires_model_planning"))
     requires_oracle_model = bool(plan.get("requires_oracle_model"))
+    planned_roles = {str(role) for role in plan.get("stages") or []}
+    patrol_required = "SOLDIER" in planned_roles
     route = plan.get("retrieval_contract") if isinstance(plan.get("retrieval_contract"), dict) else {}
     steps: List[Dict[str, Any]] = [
         _step(
@@ -153,16 +155,20 @@ def compile_kinetic_workflow(
                 gate="policy_bound_external_scope",
             )
         )
-    steps.append(
-        _step(
-            "patrol_quality",
-            "patrol_waste_and_gates",
-            "SOLDIER",
-            (["decision_packet", "ontology_ledger"] if ontology else ["goal_contract"]),
-            ["soldier_report"],
-            gate="no_unresolved_required_gate",
+    if patrol_required:
+        steps.append(
+            _step(
+                "patrol_quality",
+                "patrol_waste_and_gates",
+                "SOLDIER",
+                (["decision_packet", "ontology_ledger"] if ontology else ["goal_contract"]),
+                ["soldier_report"],
+                gate="no_unresolved_required_gate",
+            )
         )
-    )
+    worker_inputs = ["decision_packet"] if ontology else ["goal_contract"]
+    if patrol_required:
+        worker_inputs.append("soldier_report")
     if worker_required:
         if requires_write:
             steps.append(
@@ -170,7 +176,7 @@ def compile_kinetic_workflow(
                     "execute_action",
                     "execute_bounded_change",
                     "WORKER",
-                    ["decision_packet", "soldier_report"],
+                    worker_inputs,
                     ["workspace_change", "worker_receipt"],
                     model_required=True,
                     write_scope="task_contract_only",
@@ -183,7 +189,7 @@ def compile_kinetic_workflow(
                     "produce_deliverable",
                     "produce_evidence_bound_deliverable",
                     "WORKER",
-                    ["decision_packet", "soldier_report"],
+                    worker_inputs,
                     ["worker_result", "worker_receipt"],
                     model_required=True,
                     write_scope="none",
@@ -195,7 +201,8 @@ def compile_kinetic_workflow(
             "verify_result",
             "verify_and_publish_or_stop",
             "ORACLE",
-            (["decision_packet", "ontology_ledger", "soldier_report"] if ontology else ["decision_packet", "soldier_report"])
+            ((["decision_packet", "ontology_ledger"] if ontology else ["goal_contract"])
+            + (["soldier_report"] if patrol_required else []))
             + (["workspace_change"] if requires_write else [])
             + (["worker_result"] if requires_worker_output and not requires_write else []),
             ["oracle_verdict", "goal_outcome"],
@@ -219,10 +226,19 @@ def compile_kinetic_workflow(
             "allow_full_catalog_in_prompt": False,
             "allow_unbounded_role_retry": False,
         },
-        "state_invariants": [
-            "evidence_can_only_enter_from_observed_mcp_receipt",
-            "decision_requires_bound_evidence_slots",
-            "worker_receives_decision_packet_not_full_catalog",
+        "state_invariants": (
+            [
+                "evidence_can_only_enter_from_observed_mcp_receipt",
+                "decision_requires_bound_evidence_slots",
+                "worker_receives_decision_packet_not_full_catalog",
+            ]
+            if ontology
+            else [
+                "local_work_never_requires_opencrab_receipts",
+                "worker_receives_goal_contract_without_ontology_handoff",
+            ]
+        )
+        + [
             "oracle_publishes_only_after_required_receipts",
             "non_mutating_worker_never_emits_workspace_change",
         ],
