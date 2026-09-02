@@ -348,6 +348,17 @@ def test_korean_negated_opencrab_scope_does_not_activate_ontology() -> None:
     assert plan.external_scouting is False
 
 
+def test_korean_coordinated_opencrab_scope_does_not_activate_ontology() -> None:
+    plan = classify_goal(
+        "운영 배포 검증용 파일을 만들어. OpenCrab 데이터에는 접근하거나 변경하지 마. "
+        "외부 서비스와 사용자 데이터 없이 격리된 로컬 작업만 수행해."
+    )
+    assert plan.requires_write is True
+    assert plan.ontology_required is False
+    assert plan.external_scouting is False
+    assert "QUEEN" not in plan.stages
+
+
 def test_positive_opencrab_and_external_signals_still_activate_routing() -> None:
     plan = classify_goal("Use OpenCrab evidence and external web research to analyze the architecture.")
     assert plan.ontology_required is True
