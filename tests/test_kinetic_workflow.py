@@ -197,6 +197,45 @@ def test_local_mcpworld_execution_has_no_opencrab_or_queen_handoff() -> None:
     assert not any(step["role"] in {"QUEEN", "SOLDIER"} for step in workflow["steps"])
 
 
+def test_high_risk_local_soldier_does_not_require_opencrab_evidence(tmp_path: Path) -> None:
+    objective = (
+        "Create exactly one local verification marker in the isolated mission artifact boundary and record its digest. "
+        "The bounded change is intentionally deterministic and must stay inside the mission workspace. "
+        "Preserve all pre-existing files, use the compiled task contract, and report the created marker and focused check. "
+        "No additional service, lookup, or shared resource is part of this operation. "
+        "The operator must keep the path, scope, receipt, and verification details explicit for the final review."
+    )
+    plan = classify_goal(objective)
+    assert plan.requires_write is True
+    assert plan.ontology_required is False
+    assert plan.external_scouting is False
+    assert "SOLDIER" in plan.stages
+
+    service = RuntimeService(tmp_path)
+    session = service.store.create_session(interaction_mode="colony")
+    planned = service.plan_mission(objective, session_id=session["session_id"], adaptive=True)
+    executor = ColonyExecutor(service, session["session_id"], object(), threading.Event())
+    executor.goal_plan = dict(planned["goal_plan"])
+    executor.goal_graph = dict(planned["goal_graph"])
+    executor.kinetic_workflow = dict(planned["kinetic_workflow"])
+    soldier = next(row for row in planned["tasks"] if row["role"] == "SOLDIER")
+
+    artifact_id = executor._run_soldier(planned["mission"]["mission_id"], soldier, [])
+
+    snapshot = service.store.inspect(planned["mission"]["mission_id"])
+    report = json.loads(
+        Path(next(row for row in snapshot["artifacts"] if row["artifact_id"] == artifact_id)["path"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    authoritative_check = next(row for row in report["judge_checks"] if row["check"] == "authoritative_evidence")
+    assert report["decision"] == "continue"
+    assert authoritative_check["passed"] is True
+    assert authoritative_check["reason"].startswith("local workspace scope")
+    assert "authoritative_claim_gate_blocked" not in report["stop_reasons"]
+    assert next(row for row in snapshot["tasks"] if row["task_id"] == soldier["task_id"])["status"] == "completed"
+
+
 def test_malformed_queen_handoff_gets_one_bounded_repair(tmp_path: Path) -> None:
     service = RuntimeService(tmp_path)
     session = service.store.create_session(interaction_mode="colony")

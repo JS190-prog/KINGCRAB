@@ -3127,6 +3127,10 @@ class ColonyExecutor:
         duplicate_artifacts = len(digests) - len(set(digests))
         claim_gate = str(self.opencrab_receipt.get("claim_gate") or "none")
         graph_gate = str(self.opencrab_receipt.get("graph_gate") or "not_required")
+        local_workspace_scope = (
+            not bool(self.goal_plan.get("ontology_required"))
+            and not bool(self.goal_plan.get("external_scouting"))
+        )
         context_quality = self.opencrab_receipt.get("quality") if isinstance(self.opencrab_receipt.get("quality"), dict) else {}
         queen_handoff_quality = self._queen_handoff_quality(context) if self.goal_plan.get("ontology_required") else {}
         metadata_only_lookup = (
@@ -3184,9 +3188,16 @@ class ColonyExecutor:
                 "check": "authoritative_evidence",
                 "passed": (
                     metadata_only_lookup
+                    or local_workspace_scope
                     or (bool(self.opencrab_receipt.get("evidence_count")) and claim_gate == "pass")
                 ),
-                "reason": "typed OpenCrab observation gate" if metadata_only_lookup else "observed OpenCrab evidence and claim gate",
+                "reason": (
+                    "typed OpenCrab observation gate"
+                    if metadata_only_lookup
+                    else "local workspace scope; OpenCrab evidence is not required"
+                    if local_workspace_scope
+                    else "observed OpenCrab evidence and claim gate"
+                ),
             },
             {
                 "check": "queen_handoff",
@@ -3229,7 +3240,7 @@ class ColonyExecutor:
             stop_reasons.append("repeated_failed_attempts")
         if duplicate_artifacts:
             stop_reasons.append("duplicate_artifact_digest")
-        if claim_gate == "blocked" and not metadata_only_lookup:
+        if claim_gate == "blocked" and not metadata_only_lookup and not local_workspace_scope:
             stop_reasons.append("authoritative_claim_gate_blocked")
         if self.goal_plan.get("graph_required") and graph_gate != "pass":
             stop_reasons.append("graph_path_gate_blocked")
