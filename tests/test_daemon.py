@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from crabagent.daemon import RuntimeServer, _king_title, _mcp_policy_with
+from crabagent.daemon import RuntimeServer, _king_title, _mcp_policy_with, _mission_summary
 from crabagent.models import MissionContract, MissionStatus, Role, TaskSlot
 from crabagent.protocol import DaemonClient, USE_UNIX_SOCKET, runtime_paths, start_daemon
 
@@ -80,7 +80,7 @@ def test_daemon_protocol_runs_demo_and_replays_receipts(tmp_path: Path) -> None:
         assert summary["mission"]["mission_id"] == mission_id
         assert set(summary["mission"]) <= {
             "mission_id", "objective", "status", "risk",
-            "session_id", "created_at", "updated_at",
+            "session_id", "execution_scope", "created_at", "updated_at",
         }
         pending = client.request("mission.pending_requests", mission_id=mission_id)
         assert pending == {"requests": []}
@@ -107,6 +107,12 @@ def test_daemon_protocol_runs_demo_and_replays_receipts(tmp_path: Path) -> None:
         thread.join(timeout=2)
         if paths["socket"].exists():
             paths["socket"].unlink()
+
+
+def test_mission_summary_exposes_execution_scope_for_runtime_readback() -> None:
+    summary = _mission_summary({"mission_id": "mission-scope", "execution_scope": "local_only"})
+
+    assert summary["execution_scope"] == "local_only"
 
 
 def test_host_executor_runs_durable_model_turns_without_codex(tmp_path: Path) -> None:

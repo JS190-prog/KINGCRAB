@@ -54,6 +54,7 @@ MISSION_SUMMARY_FIELDS = (
     "status",
     "risk",
     "session_id",
+    "execution_scope",
     "created_at",
     "updated_at",
 )
