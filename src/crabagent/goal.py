@@ -513,6 +513,15 @@ def classify_goal(
     requires_worker_output = _requires_worker_output(text)
     research = _contains(signal_text, RESEARCH_SIGNALS)
     external = _contains(signal_text, EXTERNAL_SIGNALS)
+    if scope == EXECUTION_SCOPE_LOCAL_ONLY:
+        # Negative wording can leave a bare "external" token after scope
+        # scrubbing (for example, "외부 변경도 하지 마").  An explicit
+        # local-only contract is authoritative and must never become a
+        # Soldier/external or research route because of that residue.
+        ontology = False
+        research = False
+        external = False
+        graph_required = False
     high_risk = _contains(signal_text, HIGH_RISK_SIGNALS) or len(clean) > 320
     strategic = high_risk or (
         ontology
@@ -621,7 +630,7 @@ def classify_goal(
     stages: List[str] = ["KING"]
     if ontology:
         stages.append("QUEEN")
-    if external or high_risk or ontology:
+    if scope != EXECUTION_SCOPE_LOCAL_ONLY and (external or high_risk or ontology):
         stages.append("SOLDIER")
     if writes or requires_worker_output:
         stages.append("WORKER")

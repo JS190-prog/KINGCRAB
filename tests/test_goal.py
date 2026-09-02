@@ -226,6 +226,20 @@ def test_local_only_scope_rejects_missing_negative_boundary() -> None:
         classify_goal("OpenCrab 근거를 조회해서 결과를 작성해.", execution_scope="local_only")
 
 
+def test_local_only_scope_never_selects_soldier_from_negative_external_wording() -> None:
+    objective = (
+        "로컬 connector로 파일을 만들고 저장해. OpenCrab·온톨로지·근거·웹·외부 MCP를 사용하지 않고 "
+        "외부 변경도 하지 마."
+    )
+    plan = classify_goal(objective, execution_scope="local_only")
+
+    assert plan.ontology_required is False
+    assert plan.external_scouting is False
+    assert plan.graph_required is False
+    assert plan.stages == ["KING", "WORKER", "ORACLE"]
+    assert "SOLDIER" not in plan.stages
+
+
 def test_explicit_opencrab_media_evidence_request_keeps_ontology_route() -> None:
     plan = classify_goal(
         "OpenCrab 근거로 MCPWorld 홍보영상 구성 전략을 추천해줘.",
