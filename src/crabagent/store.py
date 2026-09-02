@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS missions (
     max_attempts INTEGER NOT NULL,
     max_workers INTEGER NOT NULL,
     worker_policy TEXT NOT NULL DEFAULT 'fixed',
+    execution_scope TEXT NOT NULL DEFAULT '',
     token_budget INTEGER,
     status TEXT NOT NULL,
     oracle_result_artifact_id TEXT,
@@ -323,6 +324,8 @@ class ColonyStore:
             if "worker_policy" not in mission_columns:
                 connection.execute("ALTER TABLE missions ADD COLUMN worker_policy TEXT NOT NULL DEFAULT 'fixed'")
             connection.execute("UPDATE missions SET worker_policy = 'fixed' WHERE worker_policy IS NULL OR worker_policy = ''")
+            if "execution_scope" not in mission_columns:
+                connection.execute("ALTER TABLE missions ADD COLUMN execution_scope TEXT NOT NULL DEFAULT ''")
             task_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(task_slots)").fetchall()
             }
@@ -408,8 +411,8 @@ class ColonyStore:
                 """
                 INSERT INTO missions(
                     mission_id, objective, acceptance_json, workspace, risk,
-                    max_attempts, max_workers, worker_policy, token_budget, status, session_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    max_attempts, max_workers, worker_policy, execution_scope, token_budget, status, session_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     contract.mission_id,
@@ -420,6 +423,7 @@ class ColonyStore:
                     contract.max_attempts,
                     contract.max_workers,
                     contract.worker_policy,
+                    contract.execution_scope,
                     contract.token_budget,
                     MissionStatus.CREATED.value,
                     session_id,

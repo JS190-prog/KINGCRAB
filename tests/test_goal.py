@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
+import sqlite3
 import threading
 import pytest
 
@@ -13,6 +14,7 @@ from crabagent.benchmark_runner import _answer_grounding_quality, _copy_for_writ
 from crabagent.goal import classify_goal
 from crabagent.models import Role
 from crabagent.runtime import RuntimeService
+from crabagent.store import ColonyStore
 from crabagent.inverter import SolteluInverter
 from crabagent.workspace_observer import capture_workspace, diff_workspace
 
@@ -214,11 +216,44 @@ def test_explicit_local_only_scope_scrubs_ambient_ontology_context(tmp_path: Pat
         execution_scope="local_only",
     )
     assert snapshot["goal_plan"]["execution_scope"] == "local_only"
+    mission_row = service.store.mission(snapshot["mission"]["mission_id"])
+    assert mission_row["execution_scope"] == "local_only"
     mission_created = next(
         event for event in service.store.events(snapshot["mission"]["mission_id"])
         if event.event_type == "mission_created"
     )
     assert mission_created.payload["execution_scope"] == "local_only"
+
+
+def test_existing_mission_schema_migrates_execution_scope(tmp_path: Path) -> None:
+    store = ColonyStore(tmp_path)
+    store.home.mkdir(parents=True)
+    with sqlite3.connect(store.database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE missions (
+                mission_id TEXT PRIMARY KEY,
+                objective TEXT NOT NULL,
+                acceptance_json TEXT NOT NULL,
+                workspace TEXT NOT NULL,
+                risk TEXT NOT NULL,
+                max_attempts INTEGER NOT NULL,
+                max_workers INTEGER NOT NULL,
+                worker_policy TEXT NOT NULL DEFAULT 'fixed',
+                token_budget INTEGER,
+                status TEXT NOT NULL,
+                oracle_result_artifact_id TEXT,
+                session_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    store.initialize()
+    with store.connection() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(missions)")}
+    assert "execution_scope" in columns
 
 
 def test_local_only_scope_rejects_missing_negative_boundary() -> None:
