@@ -106,6 +106,7 @@ class MissionContract:
     max_workers: int
     token_budget: Optional[int]
     worker_policy: str = WorkerPolicy.FIXED.value
+    execution_scope: str = ""
     created_at: str = field(default_factory=utc_now)
 
     def to_dict(self) -> Dict[str, Any]:

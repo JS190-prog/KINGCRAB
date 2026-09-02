@@ -83,7 +83,8 @@ def test_clear_code_goal_uses_one_model_turn_and_local_gates(tmp_path: Path) -> 
     assert plan.estimated_model_turns == 1
     assert plan.ontology_required is False
 
-    snapshot = RuntimeService(tmp_path).plan_mission(
+    service = RuntimeService(tmp_path)
+    snapshot = service.plan_mission(
         plan.objective,
         adaptive=True,
     )
@@ -182,6 +183,47 @@ def test_local_mcpworld_media_execution_does_not_require_opencrab() -> None:
     assert plan.stages == ["KING", "WORKER", "ORACLE"]
     assert "QUEEN" not in plan.stages
     assert "opencrab_mcp_context_receipt_observed" not in plan.acceptance_checks
+
+
+def test_explicit_local_only_scope_scrubs_ambient_ontology_context(tmp_path: Path) -> None:
+    objective = (
+        "Blender에서 로컬 장면 파일을 만들고 저장해. "
+        "OpenCrab 근거 조회 없이 외부 서비스 없이 로컬 작업만 수행해."
+    )
+    plan = classify_goal(
+        objective,
+        selected_pack_count=4,
+        selected_project_count=2,
+        knowledge_available=True,
+        execution_scope="local_only",
+    )
+
+    assert plan.execution_scope == "local_only"
+    assert plan.selected_pack_count == 0
+    assert plan.selected_project_count == 0
+    assert plan.ontology_required is False
+    assert plan.external_scouting is False
+    assert plan.graph_required is False
+    assert plan.requires_model_queen is False
+    assert plan.stages == ["KING", "WORKER", "ORACLE"]
+
+    service = RuntimeService(tmp_path)
+    snapshot = service.plan_mission(
+        objective,
+        adaptive=True,
+        execution_scope="local_only",
+    )
+    assert snapshot["goal_plan"]["execution_scope"] == "local_only"
+    mission_created = next(
+        event for event in service.store.events(snapshot["mission"]["mission_id"])
+        if event.event_type == "mission_created"
+    )
+    assert mission_created.payload["execution_scope"] == "local_only"
+
+
+def test_local_only_scope_rejects_missing_negative_boundary() -> None:
+    with pytest.raises(ValueError, match="local_only execution_scope"):
+        classify_goal("OpenCrab 근거를 조회해서 결과를 작성해.", execution_scope="local_only")
 
 
 def test_explicit_opencrab_media_evidence_request_keeps_ontology_route() -> None:
@@ -428,6 +470,25 @@ def test_queen_write_prompt_is_read_only_and_hands_off_to_worker(tmp_path: Path)
     prompt = executor._prompt(Role.QUEEN, executor.goal_plan["objective"], [])
     assert "QUEEN IS READ-ONLY" in prompt
     assert "WORKER alone may change the workspace" in prompt
+
+
+def test_local_only_prompt_carries_hard_no_opencrab_boundary(tmp_path: Path) -> None:
+    objective = "로컬 파일을 만들고 저장해. OpenCrab 근거 조회 없이 외부 서비스 없이 진행해."
+    service = RuntimeService(tmp_path)
+    session = service.store.create_session(interaction_mode="colony")
+    executor = ColonyExecutor(
+        service,
+        session["session_id"],
+        object(),
+        threading.Event(),
+        execution_scope="local_only",
+    )
+    executor.goal_plan = classify_goal(objective, execution_scope="local_only").to_dict()
+    prompt = executor._prompt(Role.WORKER, objective, [])
+
+    assert "LOCAL-ONLY EXECUTION SCOPE" in prompt
+    assert "Do not call OpenCrab" in prompt
+    assert "Do not invent a Queen/Soldier route" in prompt
 
 
 def test_host_worker_prompt_always_carries_artifact_contract(tmp_path: Path) -> None:

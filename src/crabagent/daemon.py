@@ -23,7 +23,7 @@ from .conversation import ConversationExecutor, interaction_kind
 from .continuation import continuation_intent
 from .discovery import mcp_inventory, observed_assets
 from .folder_ingest import OpenCrabPackBuilder, remote_package_id, remote_status, upload_session_id_from_result
-from .goal import classify_goal
+from .goal import EXECUTION_SCOPE_LOCAL_ONLY, classify_goal, normalize_execution_scope
 from .opencrab import OpenCrabInspector, OpenCrabMcpClient, OpenCrabUnavailable, filter_inventory_for_display, opencrab_is_configured, opencrab_url
 from .opencrab_snapshot import SnapshotPersistenceError, compact_diff, compact_snapshot, local_diff_result, local_snapshot_result, persist_sync
 from .ontology_context import OntologyContextCollector
@@ -46,6 +46,7 @@ RUNTIME_CAPABILITIES = (
     "mission.summary",
     "mission.pending_requests",
     "mission.host_turn",
+    "mission.execution_scope",
 )
 MISSION_SUMMARY_FIELDS = (
     "mission_id",
@@ -433,7 +434,11 @@ class RuntimeServer(_RuntimeServerBase):
         *,
         retry_of: str = "",
         preloaded_opencrab_context: Optional[Dict[str, Any]] = None,
+        execution_scope: str = "",
     ) -> Dict[str, Any]:
+        execution_scope = normalize_execution_scope(execution_scope)
+        if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY and preloaded_opencrab_context is not None:
+            raise RuntimeError("local_only execution scope cannot carry OpenCrab context")
         session_id = str(session["session_id"])
         self.service.store.update_session(session_id, title=_king_title(objective))
         with self._state_lock:
@@ -463,6 +468,7 @@ class RuntimeServer(_RuntimeServerBase):
                         cancel,
                         opencrab_context_loader=loader,
                         retry_of=retry_of,
+                        execution_scope=execution_scope,
                     )
                     executor.run(
                         objective,
@@ -481,6 +487,7 @@ class RuntimeServer(_RuntimeServerBase):
             "interaction": "colony",
             "objective": objective,
             "retry_of": retry_of or None,
+            "execution_scope": execution_scope,
         }
 
     def _retry_last_mission(self, session: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:
@@ -501,6 +508,8 @@ class RuntimeServer(_RuntimeServerBase):
         source = candidates[0]
         source_mission_id = str(source["mission_id"])
         detail = self.service.store.inspect(source_mission_id)
+        source_goal_plan = self._artifact_payload(detail, "goal_plan")
+        execution_scope = normalize_execution_scope(source_goal_plan.get("execution_scope"))
         changed_files = 0
         for artifact in detail.get("artifacts") or []:
             if str(artifact.get("kind") or "") != "workspace_change":
@@ -523,6 +532,8 @@ class RuntimeServer(_RuntimeServerBase):
         preloaded_opencrab_context: Optional[Dict[str, Any]] = None
         opencrab_context_status = ""
         if context_artifacts:
+            if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY:
+                raise RuntimeError("retry blocked: local_only mission cannot reuse OpenCrab context")
             receipt = self._artifact_payload(detail, "mcp_context_receipt")
             if not receipt:
                 raise RuntimeError("retry blocked: previous OpenCrab context receipt is unreadable")
@@ -561,6 +572,7 @@ class RuntimeServer(_RuntimeServerBase):
             objective,
             retry_of=source_mission_id,
             preloaded_opencrab_context=preloaded_opencrab_context,
+            execution_scope=execution_scope,
         )
 
     @staticmethod
@@ -855,9 +867,15 @@ class RuntimeServer(_RuntimeServerBase):
         *,
         direct_opencrab: bool = False,
         preloaded_opencrab_context: Optional[Dict[str, Any]] = None,
+        execution_scope: str = "",
     ) -> Dict[str, Any]:
+        execution_scope = normalize_execution_scope(execution_scope)
+        if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY and direct_opencrab:
+            raise RuntimeError("local_only execution scope cannot use direct OpenCrab")
         continuation = self._dispatch_continuation(session, prompt)
         if continuation is not None:
+            if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY:
+                raise RuntimeError("local_only execution scope cannot continue an existing mission")
             return continuation
         mode = explicit or str(session.get("interaction_mode") or "auto")
         context = self.service.store.ontology_context(str(session.get("session_id") or ""))
@@ -866,8 +884,14 @@ class RuntimeServer(_RuntimeServerBase):
             mode,
             selected_pack_count=len(context.get("package_ids") or []),
             selected_project_count=len(context.get("project_ids") or []),
-            knowledge_available=self._knowledge_available(session),
+            knowledge_available=(
+                False
+                if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY
+                else self._knowledge_available(session)
+            ),
         )
+        if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY and kind == "chat":
+            raise RuntimeError("local_only execution scope requires a colony execution")
         return (
             self._launch_chat(session, prompt, direct_opencrab=direct_opencrab)
             if kind == "chat"
@@ -875,6 +899,7 @@ class RuntimeServer(_RuntimeServerBase):
                 session,
                 prompt,
                 preloaded_opencrab_context=preloaded_opencrab_context,
+                execution_scope=execution_scope,
             )
         )
 
@@ -1567,12 +1592,17 @@ class RuntimeServer(_RuntimeServerBase):
                 raise ValueError("objective is empty")
             disposition = str(payload.get("disposition") or "start")
             session_id = str(session["session_id"])
+            execution_scope = normalize_execution_scope(payload.get("execution_scope"))
             with self._state_lock:
                 running = bool(self._jobs.get(session_id) and self._jobs[session_id].is_alive())
             preloaded_opencrab_context = self._bounded_preloaded_opencrab_context(payload.get("opencrab_context"))
+            if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY and preloaded_opencrab_context is not None:
+                raise RuntimeError("local_only execution scope cannot carry OpenCrab context")
             if running and preloaded_opencrab_context is not None:
                 raise RuntimeError("preloaded OpenCrab context cannot be queued onto a running mission")
             if running:
+                if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY:
+                    raise RuntimeError("local_only execution scope cannot be queued onto a running mission")
                 if disposition not in {"now", "wait"}:
                     raise RuntimeError("mission is running; choose disposition now or wait")
                 queued = self.service.store.enqueue_input(session_id, objective, disposition)
@@ -1585,6 +1615,7 @@ class RuntimeServer(_RuntimeServerBase):
                 str(payload.get("interaction") or ""),
                 direct_opencrab=bool(payload.get("benchmark_direct")),
                 preloaded_opencrab_context=preloaded_opencrab_context,
+                execution_scope=execution_scope,
             )
         if action == "mission.retry":
             session = self._session(str(payload.get("session_id") or ""))
@@ -1631,11 +1662,17 @@ class RuntimeServer(_RuntimeServerBase):
             session_id = str(payload.get("session_id") or "")
             session = self._session(session_id) if session_id else {}
             context = self.service.store.ontology_context(session_id) if session_id else {}
+            execution_scope = normalize_execution_scope(payload.get("execution_scope"))
             plan = classify_goal(
                 str(payload.get("objective") or ""),
                 selected_pack_count=len(context.get("package_ids") or []),
                 selected_project_count=len(context.get("project_ids") or []),
-                knowledge_available=self._knowledge_available(session),
+                knowledge_available=(
+                    False
+                    if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY
+                    else self._knowledge_available(session)
+                ),
+                execution_scope=execution_scope,
             )
             return {"plan": plan.to_dict()}
         if action == "plan":
@@ -1644,6 +1681,7 @@ class RuntimeServer(_RuntimeServerBase):
                 max_workers=int(payload.get("max_workers", 3)),
                 token_budget=payload.get("token_budget"),
                 adaptive=True,
+                execution_scope=payload.get("execution_scope"),
             )
         if action == "run_demo":
             return self.service.run_demo(

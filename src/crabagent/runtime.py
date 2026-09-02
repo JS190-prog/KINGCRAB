@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .goal import GoalPlan, classify_goal
+from .goal import GoalPlan, classify_goal, normalize_execution_scope
 from .goal_graph import compile_goal_graph
 from .kinetic_workflow import compile_kinetic_workflow
 from .inverter import SolteluInverter
@@ -55,8 +55,10 @@ class RuntimeService:
         token_budget: Optional[int] = None,
         session_id: Optional[str] = None,
         adaptive: bool = False,
+        execution_scope: Optional[str] = None,
     ) -> Dict[str, Any]:
         self.initialize()
+        normalized_execution_scope = normalize_execution_scope(execution_scope)
         mission_id = new_id("mission")
         selected_pack_count = 0
         selected_project_count = 0
@@ -76,6 +78,7 @@ class RuntimeService:
             selected_pack_count=selected_pack_count,
             selected_project_count=selected_project_count,
             knowledge_available=knowledge_available,
+            execution_scope=normalized_execution_scope,
         ) if adaptive else None
         effective_token_budget = token_budget
         if effective_token_budget is None and goal_plan is not None:
@@ -90,6 +93,7 @@ class RuntimeService:
             max_workers=max(1, min(max_workers, 8)),
             token_budget=effective_token_budget,
             worker_policy=worker_policy if worker_policy in {item.value for item in WorkerPolicy} else WorkerPolicy.FIXED.value,
+            execution_scope=normalized_execution_scope,
         )
         self.store.create_mission(contract, session_id=session_id)
 

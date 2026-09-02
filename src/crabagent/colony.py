@@ -45,6 +45,7 @@ from .ontology_contract import (
     update_decision_gate,
 )
 from .goal_graph import compact_goal_graph, compile_goal_graph
+from .goal import EXECUTION_SCOPE_LOCAL_ONLY, normalize_execution_scope
 from .kinetic_contract import compact_king_plan, compile_king_plan
 from .kinetic_workflow import compact_kinetic_workflow, workflow_summary
 from .runtime import RuntimeService
@@ -219,6 +220,7 @@ class ColonyExecutor:
         on_runtime_request: Optional[Callable[[Dict[str, Any]], None]] = None,
         opencrab_context_loader: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         retry_of: str = "",
+        execution_scope: str = "",
     ) -> None:
         self.service = service
         self.store = service.store
@@ -243,6 +245,7 @@ class ColonyExecutor:
         self.automatic_revision_cycles = 0
         self._repair_mode = ""
         self.retry_of = str(retry_of or "")
+        self.execution_scope = normalize_execution_scope(execution_scope)
 
     def _record_kinetic_transition(
         self,
@@ -1092,9 +1095,27 @@ class ColonyExecutor:
             worker_policy=worker_policy,
             session_id=self.session_id,
             adaptive=True,
+            execution_scope=self.execution_scope,
         )
         mission_id = str(planned["mission"]["mission_id"])
         self.goal_plan = dict(planned.get("goal_plan") or {})
+        if self.execution_scope == EXECUTION_SCOPE_LOCAL_ONLY:
+            forbidden_stages = {
+                str(stage).upper()
+                for stage in (self.goal_plan.get("stages") or [])
+                if str(stage).strip()
+            } & {"QUEEN", "SOLDIER"}
+            if (
+                bool(self.goal_plan.get("ontology_required"))
+                or bool(self.goal_plan.get("external_scouting"))
+                or bool(self.goal_plan.get("graph_required"))
+                or bool(self.goal_plan.get("requires_model_queen"))
+                or forbidden_stages
+                or str(self.goal_plan.get("execution_scope") or "") != EXECUTION_SCOPE_LOCAL_ONLY
+            ):
+                raise RuntimeError("local_only runtime plan contains a forbidden ontology or external route")
+            self.ontology_context = {}
+            self.opencrab_context_loader = None
         self.goal_graph = dict(planned.get("goal_graph") or compile_goal_graph(self.goal_plan))
         self.kinetic_workflow = dict(planned.get("kinetic_workflow") or {})
         self.kinetic_trace = []
@@ -2597,6 +2618,7 @@ class ColonyExecutor:
                 "kind": self.goal_plan.get("kind"),
                 "complexity": self.goal_plan.get("complexity"),
                 "ontology_required": self.goal_plan.get("ontology_required"),
+                "execution_scope": self.goal_plan.get("execution_scope") or self.execution_scope,
                 "ontology_mode": self.goal_plan.get("ontology_mode"),
                 "graph_required": self.goal_plan.get("graph_required"),
                 "outcome_type": self.goal_plan.get("outcome_type"),
@@ -2632,6 +2654,14 @@ class ColonyExecutor:
             goal_contract = "\n\nGOAL PLAN (compiled before model calls; honor it):\n%s" % json.dumps(
                 plan_fields,
                 ensure_ascii=False,
+            )
+        execution_scope_contract = ""
+        if self.execution_scope == EXECUTION_SCOPE_LOCAL_ONLY:
+            execution_scope_contract = (
+                "\n\nLOCAL-ONLY EXECUTION SCOPE (hard boundary):\n"
+                "Use only the requested local connector and workspace. Do not call OpenCrab, ontology/graph retrieval, "
+                "web or external scouting, or any evidence MCP. Do not invent a Queen/Soldier route. If the local operation "
+                "would require a forbidden service, stop and report the blocked boundary instead of substituting another route."
             )
         graph = self.goal_graph or compile_goal_graph(self.goal_plan)
         graph_contract = "\n\nGOAL GRAPH (operational contract; fill slots, do not invent them):\n%s" % compact_goal_graph(
@@ -2697,7 +2727,7 @@ class ColonyExecutor:
                 "the answer into a meta-instruction for a future role. Preserve a directly observed sequence when the evidence "
                 "contains it, and do not call that sequence missing. Do not mention internal model routing/profile names "
                 "unless the objective asks about them. STOP is allowed after that observed result is complete."
-                "%s" % (objective, goal_contract, receipt, graph_contract + ontology_contract + kinetic_contract + king_contract + repair_contract, write_boundary)
+                "%s" % (objective, goal_contract + execution_scope_contract, receipt, graph_contract + ontology_contract + kinetic_contract + king_contract + repair_contract, write_boundary)
             )
         receipt_summary = "No active mission receipt."
         if role is not Role.QUEEN:
@@ -2740,7 +2770,7 @@ class ColonyExecutor:
             "PERSISTED RECEIPTS (bounded):\n%s\n\n"
             "PRIOR OBSERVED CONTEXT (bounded handoff):\n%s%s%s\n\n"
             "Return a compact evidence-backed result for the next role. Never pretend a tool or test ran."
-            % (role.value, objective, ROLE_INSTRUCTIONS[role], receipt_summary, prior, goal_contract, graph_contract + ontology_contract + kinetic_contract + king_contract + inventory)
+            % (role.value, objective, ROLE_INSTRUCTIONS[role], receipt_summary, prior, goal_contract + execution_scope_contract, graph_contract + ontology_contract + kinetic_contract + king_contract + inventory)
         )
         if role is Role.KING:
             rendered += (
@@ -2776,7 +2806,7 @@ class ColonyExecutor:
             "PERSISTED RECEIPTS (bounded):\n%s\n\n"
             "PRIOR OBSERVED CONTEXT (compressed):\n%s%s%s\n\n"
             "Return a compact evidence-backed result for the next role. Never pretend a tool or test ran."
-            % (role.value, objective, ROLE_INSTRUCTIONS[role], receipt_summary[-1200:], compact_prior, goal_contract, compact_inventory)
+            % (role.value, objective, ROLE_INSTRUCTIONS[role], receipt_summary[-1200:], compact_prior, goal_contract + execution_scope_contract, compact_inventory)
         )
         if role is Role.KING:
             compact_result += (

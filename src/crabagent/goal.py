@@ -7,6 +7,17 @@ from typing import Any, Dict, List, Optional
 from .ontology_route import compile_ontology_route
 
 
+EXECUTION_SCOPE_LOCAL_ONLY = "local_only"
+SUPPORTED_EXECUTION_SCOPES = frozenset({"", EXECUTION_SCOPE_LOCAL_ONLY})
+
+
+def normalize_execution_scope(value: Optional[str]) -> str:
+    scope = str(value or "").strip().casefold()
+    if scope not in SUPPORTED_EXECUTION_SCOPES:
+        raise ValueError("unsupported execution_scope: %s" % (scope or "<empty>"))
+    return scope
+
+
 ONTOLOGY_SIGNALS = (
     "ontology",
     "opencrab",
@@ -362,6 +373,28 @@ def _scope_signal_text(text: str) -> str:
     return scrubbed
 
 
+def _request_disables_evidence_lookup(text: str) -> bool:
+    return any(re.search(pattern, str(text or ""), flags=re.IGNORECASE) for pattern in NEGATED_SCOPE_CONTEXTS)
+
+
+def _request_requests_evidence_first(text: str) -> bool:
+    lowered = re.sub(r"\s+", " ", str(text or "").casefold())
+    return any(
+        cue in lowered
+        for cue in (
+            "evidence-first",
+            "evidence first",
+            "evidence_first",
+            "근거 우선",
+            "근거 먼저",
+            "근거 중심",
+            "근거 기반",
+            "증거 우선",
+            "증거 먼저",
+        )
+    )
+
+
 def _contains_write_intent(text: str) -> bool:
     scrubbed = text
     for phrase in NEGATED_WRITE_PHRASES:
@@ -407,6 +440,7 @@ class GoalPlan:
     stop_conditions: List[str] = field(default_factory=list)
     retrieval_contract: Dict[str, Any] = field(default_factory=dict)
     rationale: List[str] = field(default_factory=list)
+    execution_scope: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -419,6 +453,7 @@ def classify_goal(
     selected_project_count: int = 0,
     knowledge_available: bool = False,
     forced: Optional[str] = None,
+    execution_scope: Optional[str] = None,
 ) -> GoalPlan:
     """Compile a user goal into a minimal executable colony graph.
 
@@ -426,6 +461,18 @@ def classify_goal(
     Codex is reserved for the role that needs interpretation or execution.
     """
     clean = " ".join(str(objective or "").split())
+    scope = normalize_execution_scope(execution_scope)
+    if scope == EXECUTION_SCOPE_LOCAL_ONLY:
+        if not _request_disables_evidence_lookup(clean) or _request_requests_evidence_first(clean):
+            raise ValueError(
+                "local_only execution_scope requires an explicit request to skip evidence/OpenCrab lookup"
+            )
+        # A local-only request is an explicit authority boundary. Ambient
+        # session selections must not leak into the classifier or silently
+        # reactivate the ontology route.
+        selected_pack_count = 0
+        selected_project_count = 0
+        knowledge_available = False
     text = clean.lower()
     signal_text = _scope_signal_text(text)
     selected_context = max(0, int(selected_pack_count)) > 0 or max(0, int(selected_project_count)) > 0
@@ -665,6 +712,8 @@ def classify_goal(
         rationale.append("this goal requires an executable next action; STOP is allowed only when the evidence gate is blocked")
     if not requires_verification:
         rationale.append("no claim or artifact is being published; ORACLE is omitted")
+    if scope == EXECUTION_SCOPE_LOCAL_ONLY:
+        rationale.append("explicit local-only execution scope disables OpenCrab, ontology, graph and external lookup")
 
     acceptance_checks: List[str] = ["goal_contract_persisted", "every_claim_has_observed_receipt"]
     if ontology:
@@ -726,6 +775,7 @@ def classify_goal(
         stop_conditions=stop_conditions,
         retrieval_contract=retrieval_contract,
         rationale=rationale,
+        execution_scope=scope,
     )
 
 

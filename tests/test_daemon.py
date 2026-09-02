@@ -221,6 +221,112 @@ def test_host_executor_runs_durable_model_turns_without_codex(tmp_path: Path) ->
             paths["socket"].unlink()
 
 
+def test_local_only_scope_crosses_daemon_preview_and_dispatch_boundary(tmp_path: Path, monkeypatch) -> None:
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    server = RuntimeServer(tmp_path, paths["socket"])
+    captured = {}
+    objective = (
+        "Blender에서 로컬 장면 파일을 만들고 저장해. "
+        "OpenCrab 근거 조회 없이 외부 서비스 없이 로컬 작업만 수행해."
+    )
+
+    def fake_launch(self, session, prompt, **kwargs):
+        captured.update(kwargs)
+        return {
+            "session_id": session["session_id"],
+            "status": "starting",
+            "interaction": "colony",
+            "execution_scope": kwargs.get("execution_scope"),
+        }
+
+    monkeypatch.setattr(RuntimeServer, "_launch_colony", fake_launch)
+    try:
+        session = server.dispatch({"action": "session.ensure", "payload": {}})
+        server.dispatch({
+            "action": "ontology.context",
+            "payload": {
+                "session_id": session["session_id"],
+                "project_ids": ["project-selected"],
+                "package_ids": ["package-selected"],
+            },
+        })
+        preview = server.dispatch({
+            "action": "goal.preview",
+            "payload": {
+                "session_id": session["session_id"],
+                "objective": objective,
+                "execution_scope": "local_only",
+            },
+        })["plan"]
+        assert preview["execution_scope"] == "local_only"
+        assert preview["selected_pack_count"] == 0
+        assert preview["selected_project_count"] == 0
+        assert preview["stages"] == ["KING", "WORKER", "ORACLE"]
+
+        started = server.dispatch({
+            "action": "prompt.submit",
+            "payload": {
+                "session_id": session["session_id"],
+                "objective": objective,
+                "disposition": "start",
+                "interaction": "colony",
+                "execution_scope": "local_only",
+            },
+        })
+        assert started["execution_scope"] == "local_only"
+        assert captured["execution_scope"] == "local_only"
+    finally:
+        server.server_close()
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
+def test_local_only_scope_survives_unix_socket_protocol_round_trip(tmp_path: Path, monkeypatch) -> None:
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    if paths["socket"].exists():
+        paths["socket"].unlink()
+    server = RuntimeServer(tmp_path, paths["socket"])
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    objective = "로컬 파일을 만들고 저장해. OpenCrab 근거 조회 없이 외부 서비스 없이 진행해."
+    captured = {}
+
+    def fake_launch(self, session, prompt, **kwargs):
+        captured.update(kwargs)
+        return {"session_id": session["session_id"], "status": "starting", "interaction": "colony", **kwargs}
+
+    monkeypatch.setattr(RuntimeServer, "_launch_colony", fake_launch)
+    try:
+        client = DaemonClient(tmp_path)
+        session = client.request("session.ensure")
+        client.request("session.configure", session_id=session["session_id"], mcp_policy="off")
+        preview = client.request(
+            "goal.preview",
+            session_id=session["session_id"],
+            objective=objective,
+            execution_scope="local_only",
+        )["plan"]
+        assert preview["execution_scope"] == "local_only"
+        started = client.request(
+            "prompt.submit",
+            session_id=session["session_id"],
+            objective=objective,
+            interaction="colony",
+            disposition="start",
+            execution_scope="local_only",
+        )
+        assert started["execution_scope"] == "local_only"
+        assert captured["execution_scope"] == "local_only"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
 def test_mission_read_api_uses_updated_order_and_bounds_pending_payload(tmp_path: Path) -> None:
     paths = runtime_paths(tmp_path)
     paths["root"].mkdir(parents=True, exist_ok=True)
@@ -390,9 +496,11 @@ def test_zero_model_mission_uses_preloaded_opencrab_context_without_runtime_endp
             },
         })
         assert submitted["status"] == "starting"
-        # Windows thread startup and SQLite-backed local gates are slower than
-        # the POSIX path; keep this an integration bound rather than a race.
-        deadline = time.monotonic() + 10.0
+        # The mission has 24 bounded evidence rows and reaches VERIFYING only
+        # after SQLite-backed local gates finish. On Windows that measured
+        # lifecycle can exceed the old 10-second observer bound; keep the
+        # assertion tied to the durable terminal status with a bounded budget.
+        deadline = time.monotonic() + 30.0
         mission = None
         while time.monotonic() < deadline:
             rows = server.service.store.list_missions(limit=20)
