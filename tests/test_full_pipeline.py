@@ -91,7 +91,10 @@ def test_a_plan_without_oracle_still_terminates(tmp_path: Path) -> None:
                 if status in {"completed", "failed", "cancelled"}:
                     break
             time.sleep(0.05)
-        assert status in {"completed", "failed", "cancelled"}, f"mission stayed {status!r}"
+        # Not just "terminal": a plan that ran every task must not be reported
+        # as a failure. RUNNING -> COMPLETED is an illegal edge, and taking it
+        # surfaced in production as "Mission failed: invalid mission transition".
+        assert status == "completed", f"mission ended {status!r}"
         assert not (server.service.store.session(session_id) or {}).get("active_mission_id")
     finally:
         if session_id:

@@ -1432,6 +1432,9 @@ class ColonyExecutor:
                 # every task finished, yet the mission stayed RUNNING forever and
                 # kept its session bound. classify_goal legitimately omits ORACLE
                 # when nothing is published, so close the run here instead.
+                # RUNNING -> COMPLETED is not a legal edge; go through VERIFYING
+                # exactly as an ORACLE-bearing plan does.
+                self.store.transition_mission(mission_id, MissionStatus.VERIFYING, Role.KING)
                 self.store.transition_mission(mission_id, MissionStatus.COMPLETED, Role.KING)
                 self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
             self.store.set_budget(
