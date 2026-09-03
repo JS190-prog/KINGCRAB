@@ -128,16 +128,28 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _endpoint_override(root: Path) -> str:
+    """Read one `<root>/.crabagent/opencrab/endpoint.json` endpoint, if present."""
+    try:
+        value = json.loads((root / ".crabagent" / "opencrab" / "endpoint.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return ""
+    return str(value.get("endpoint") or "") if isinstance(value, dict) else ""
+
+
 def opencrab_url(config_path: Optional[Path] = None, workspace: Optional[Path] = None) -> str:
     """Read only the OpenCrab MCP endpoint. The value is never returned to UI/logs."""
     if workspace is not None:
-        endpoint_path = workspace.resolve() / ".crabagent" / "opencrab" / "endpoint.json"
-        try:
-            endpoint = json.loads(endpoint_path.read_text(encoding="utf-8")).get("endpoint")
-        except (OSError, ValueError, TypeError):
-            endpoint = None
+        endpoint = _endpoint_override(workspace.resolve())
         if endpoint:
-            return str(endpoint)
+            return endpoint
+    # A user-level override keeps KINGCRAB on its own OpenCrab deployment
+    # without editing Codex config. The Codex `opencrab` server may legitimately
+    # be a different surface (an ingest/authoring server exposes none of the
+    # query tools this runtime calls), and that host setup must keep working.
+    endpoint = _endpoint_override(Path.home())
+    if endpoint:
+        return endpoint
     path = config_path or Path.home() / ".codex" / "config.toml"
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -147,7 +159,11 @@ def opencrab_url(config_path: Optional[Path] = None, workspace: Optional[Path] =
     for line in lines:
         section = _MCP_SECTION.match(line)
         if section:
-            active = (section.group("quoted") or section.group("bare")) == "OpenCrab"
+            # Codex section names are user-written and appear as both
+            # `opencrab` and `OpenCrab`. opencrab_is_configured() already
+            # compares case-insensitively; matching that here is what keeps the
+            # routing hint and the actual endpoint resolver from disagreeing.
+            active = (section.group("quoted") or section.group("bare")).strip().lower() == "opencrab"
             continue
         if active:
             url = _URL.match(line)
@@ -471,6 +487,7 @@ class OpenCrabMcpClient:
         self.endpoint = endpoint
         self.opener = opener
         self.session_id = ""
+        self.initialized = False
         self.last_request_id = ""
 
     @staticmethod
@@ -500,7 +517,14 @@ class OpenCrabMcpClient:
             retryable=True,
         )
 
-    def _post(self, method: str, params: Dict[str, Any], *, expect_result: bool = True) -> Dict[str, Any]:
+    def _post(
+        self,
+        method: str,
+        params: Dict[str, Any],
+        *,
+        expect_result: bool = True,
+        timeout: float = 20.0,
+    ) -> Dict[str, Any]:
         request_id = str(uuid.uuid4())
         self.last_request_id = request_id
         stage = "mcp.%s" % method
@@ -513,7 +537,7 @@ class OpenCrabMcpClient:
             headers["Mcp-Session-Id"] = self.session_id
         body = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode("utf-8")
         try:
-            response = self.opener(Request(self.endpoint, data=body, headers=headers, method="POST"), timeout=20)
+            response = self.opener(Request(self.endpoint, data=body, headers=headers, method="POST"), timeout=timeout)
             content_type = str(response.headers.get("Content-Type") or "").lower()
             if not expect_result:
                 raw = b""
@@ -589,11 +613,19 @@ class OpenCrabMcpClient:
             },
         )
         self._post("notifications/initialized", {}, expect_result=False)
+        self.initialized = True
 
     def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        if not self.session_id:
+        # Gate on the handshake itself, not on a session id. A stateless
+        # Streamable HTTP server issues no Mcp-Session-Id, so keying off it made
+        # every tool call repeat the two-request handshake.
+        if not self.initialized:
             self.initialize()
-        result = self._post("tools/call", {"name": name, "arguments": arguments or {}})
+        # A hosted OpenCrab query runs retrieval over the whole pack catalog and
+        # is an order of magnitude slower than the handshake. Measured against
+        # opencrab.sh: 13s on a warm pack, over 20s often enough that the
+        # handshake timeout aborted real missions mid-QUEEN.
+        result = self._post("tools/call", {"name": name, "arguments": arguments or {}}, timeout=180.0)
         structured = result.get("structuredContent")
         if isinstance(structured, dict):
             return structured
