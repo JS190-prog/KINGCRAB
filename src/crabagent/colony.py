@@ -1426,6 +1426,14 @@ class ColonyExecutor:
                 self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
             elif current["status"] == MissionStatus.CANCELLED.value:
                 self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
+            elif current["status"] == MissionStatus.RUNNING.value:
+                # Only an ORACLE task moves a mission into VERIFYING, so a plan
+                # compiled without one never reached the terminal branch above:
+                # every task finished, yet the mission stayed RUNNING forever and
+                # kept its session bound. classify_goal legitimately omits ORACLE
+                # when nothing is published, so close the run here instead.
+                self.store.transition_mission(mission_id, MissionStatus.COMPLETED, Role.KING)
+                self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
             self.store.set_budget(
                 Budget(
                     mission_id=mission_id,

@@ -42,3 +42,57 @@ def test_default_routing_is_unchanged() -> None:
     assert plan.full_pipeline is False
     assert plan.stages == ["KING", "QUEEN", "SOLDIER", "ORACLE"]
     assert RuntimeService._uses_local_gate(plan, Role.KING) is True
+
+
+def test_a_plan_without_oracle_still_terminates(tmp_path: Path) -> None:
+    """No ORACLE stage must not leave the mission RUNNING and the session bound."""
+    import time
+
+    from crabagent.daemon import RuntimeServer
+    from crabagent.protocol import runtime_paths
+
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    server = RuntimeServer(tmp_path, paths["socket"])
+    session_id = ""
+    try:
+        session_id = str(server.dispatch({"action": "session.ensure", "payload": {}})["session_id"])
+        server.dispatch({
+            "action": "session.configure",
+            "payload": {
+                "session_id": session_id, "model_policy": "host", "executor_policy": "host",
+                "interaction_mode": "colony", "mcp_policy": "off", "max_workers": 1,
+            },
+        })
+        # A bounded request that publishes nothing: classify_goal omits ORACLE.
+        plan = server.dispatch({
+            "action": "goal.preview",
+            "payload": {"session_id": session_id, "objective": "안녕하세요 오늘 날씨 어때요"},
+        })["plan"]
+        assert "ORACLE" not in plan["stages"], plan["stages"]
+
+        server.dispatch({
+            "action": "prompt.submit",
+            "payload": {
+                "session_id": session_id,
+                "objective": "안녕하세요 오늘 날씨 어때요",
+                "disposition": "start",
+                "interaction": "colony",
+            },
+        })
+        deadline = time.time() + 20.0
+        status = ""
+        while time.time() < deadline:
+            rows = server.dispatch({
+                "action": "mission.list", "payload": {"session_id": session_id, "limit": 1},
+            })["missions"]
+            if rows:
+                status = str(rows[0].get("status") or "")
+                if status in {"completed", "failed", "cancelled"}:
+                    break
+            time.sleep(0.05)
+        assert status in {"completed", "failed", "cancelled"}, f"mission stayed {status!r}"
+        assert not (server.service.store.session(session_id) or {}).get("active_mission_id")
+    finally:
+        if session_id:
+            server.dispatch({"action": "session.interrupt", "payload": {"session_id": session_id}})
