@@ -886,7 +886,7 @@ class CrabAgentApp(App[None]):
                     yield Select([("Auto", "auto"), ("Sol", "sol"), ("Terra", "terra"), ("Luna", "luna")], value="auto", id="model", classes="selector", allow_blank=False)
                 with Vertical(classes="control", id="mode-control"):
                     yield Static("MODE", classes="control-label")
-                    yield Select([("Auto", "auto"), ("Chat", "chat"), ("Colony", "colony")], value="auto", id="mode", classes="selector", allow_blank=False)
+                    yield Select([("Auto", "auto"), ("Chat", "chat"), ("Colony", "colony"), ("Full x1", "full")], value="auto", id="mode", classes="selector", allow_blank=False)
                 with Vertical(classes="control", id="mcp-control"):
                     yield Static("MCP", classes="control-label")
                     yield Button("0 · SET", id="mcp-settings", classes="selector", compact=True)

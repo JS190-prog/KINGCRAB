@@ -430,6 +430,7 @@ class GoalPlan:
     action_required: bool
     response_contract: List[str]
     stages: List[str] = field(default_factory=list)
+    full_pipeline: bool = False
     ontology_spaces: List[str] = field(default_factory=list)
     evidence_gate: str = "evidence_before_claim"
     estimated_model_turns: int = 0
@@ -535,10 +536,14 @@ def classify_goal(
     else:
         graph_required = ontology and _contains_graph_signal(signal_text)
 
-    if forced in {"chat", "colony"}:
-        forced_colony = forced == "colony"
+    if forced in {"chat", "colony", "full"}:
+        forced_colony = forced in {"colony", "full"}
     else:
         forced_colony = False
+    # ``full`` is an explicit opt-in to the original five-role colony. It is a
+    # deliberate cost decision, so it never overrides an explicit local-only
+    # authority boundary, which forbids the QUEEN and SOLDIER routes outright.
+    full_pipeline = forced == "full" and scope != EXECUTION_SCOPE_LOCAL_ONLY
 
     if ontology:
         kind = "ontology_execution" if writes else "ontology_research"
@@ -592,6 +597,16 @@ def classify_goal(
         strategic or high_risk or external or graph_requires_model_review
     )
 
+    if full_pipeline:
+        # Every role must actually run, so none of them may fall back to a
+        # deterministic local gate. Strategic complexity is what carries the
+        # matching route effort and token allowance for five real turns.
+        complexity = "strategic"
+        requires_verification = True
+        requires_model_planning = True
+        requires_model_queen = True
+        requires_oracle_model = True
+
     if writes:
         outcome_type = "workspace_change"
     elif ontology:
@@ -641,6 +656,10 @@ def classify_goal(
     if forced_colony and "WORKER" not in stages and "ORACLE" not in stages:
         stages.append("WORKER")
 
+    # The original five-role colony, requested explicitly.
+    if full_pipeline:
+        stages = ["KING", "QUEEN", "SOLDIER", "WORKER", "ORACLE"]
+
     # KING and ORACLE can be deterministic gates for clear bounded work. A
     # model turn is reserved for ontology synthesis, strategic planning, real
     # external scouting, code execution, or final high-risk interpretation.
@@ -655,6 +674,8 @@ def classify_goal(
         model_turns += 1  # WORKER
     if requires_oracle_model:
         model_turns += 1  # ORACLE
+    if full_pipeline:
+        model_turns = len(stages)
 
     # A malformed Queen handoff is the one failure that can be repaired safely
     # before any workspace write. Reserve one optional turn, but do not spend
@@ -669,6 +690,14 @@ def classify_goal(
     # each planned model turn a bounded allowance instead of multiplying a
     # persistent-thread total by the number of roles.
     per_turn_input_budget = 5500
+    if full_pipeline:
+        # A full-pipeline turn carries the OpenCrab receipt plus every prior
+        # role handoff, so cost per turn grows as the colony advances instead of
+        # staying flat like the lean adaptive path. Measured on real ontology
+        # missions: 42,935 uncached input tokens after 2 turns and 132,903 after
+        # 4, i.e. roughly 45k for each later turn. Five turns land near 180k, so
+        # this is that observation plus headroom -- not a flat per-turn cost.
+        per_turn_input_budget = 40000
     # Optional repair is opportunistic: it may use only unused budget. Do not
     # enlarge the mission allowance merely because a repair is possible.
     planned_input_budget = max(1, model_turns) * per_turn_input_budget
@@ -723,6 +752,8 @@ def classify_goal(
         rationale.append("no claim or artifact is being published; ORACLE is omitted")
     if scope == EXECUTION_SCOPE_LOCAL_ONLY:
         rationale.append("explicit local-only execution scope disables OpenCrab, ontology, graph and external lookup")
+    if full_pipeline:
+        rationale.append("explicit full-pipeline request: every colony role runs a model turn and no local gate is substituted")
 
     acceptance_checks: List[str] = ["goal_contract_persisted", "every_claim_has_observed_receipt"]
     if ontology:
@@ -764,6 +795,7 @@ def classify_goal(
         action_required=action_required,
         response_contract=response_contract,
         stages=stages,
+        full_pipeline=full_pipeline,
         ontology_spaces=spaces,
         ontology_mode=(
             "graph_path"
@@ -796,8 +828,8 @@ def interaction_kind_for_goal(
     selected_project_count: int = 0,
     knowledge_available: bool = False,
 ) -> str:
-    if mode in {"chat", "colony"}:
-        return mode
+    if mode in {"chat", "colony", "full"}:
+        return "colony" if mode == "full" else mode
     plan = classify_goal(
         objective,
         selected_pack_count=selected_pack_count,

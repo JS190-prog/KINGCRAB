@@ -221,6 +221,7 @@ class ColonyExecutor:
         opencrab_context_loader: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         retry_of: str = "",
         execution_scope: str = "",
+        forced: str = "",
     ) -> None:
         self.service = service
         self.store = service.store
@@ -246,6 +247,7 @@ class ColonyExecutor:
         self._repair_mode = ""
         self.retry_of = str(retry_of or "")
         self.execution_scope = normalize_execution_scope(execution_scope)
+        self.forced = str(forced or "")
 
     def _record_kinetic_transition(
         self,
@@ -1096,6 +1098,7 @@ class ColonyExecutor:
             session_id=self.session_id,
             adaptive=True,
             execution_scope=self.execution_scope,
+            forced=self.forced or None,
         )
         mission_id = str(planned["mission"]["mission_id"])
         self.goal_plan = dict(planned.get("goal_plan") or {})

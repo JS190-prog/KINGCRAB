@@ -436,6 +436,7 @@ class RuntimeServer(_RuntimeServerBase):
         retry_of: str = "",
         preloaded_opencrab_context: Optional[Dict[str, Any]] = None,
         execution_scope: str = "",
+        forced: str = "",
     ) -> Dict[str, Any]:
         execution_scope = normalize_execution_scope(execution_scope)
         if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY and preloaded_opencrab_context is not None:
@@ -470,6 +471,7 @@ class RuntimeServer(_RuntimeServerBase):
                         opencrab_context_loader=loader,
                         retry_of=retry_of,
                         execution_scope=execution_scope,
+                        forced=forced,
                     )
                     executor.run(
                         objective,
@@ -489,6 +491,7 @@ class RuntimeServer(_RuntimeServerBase):
             "objective": objective,
             "retry_of": retry_of or None,
             "execution_scope": execution_scope,
+            "forced": forced or None,
         }
 
     def _retry_last_mission(self, session: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:
@@ -574,6 +577,7 @@ class RuntimeServer(_RuntimeServerBase):
             retry_of=source_mission_id,
             preloaded_opencrab_context=preloaded_opencrab_context,
             execution_scope=execution_scope,
+            forced="full" if source_goal_plan.get("full_pipeline") else "",
         )
 
     @staticmethod
@@ -893,16 +897,23 @@ class RuntimeServer(_RuntimeServerBase):
         )
         if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY and kind == "chat":
             raise RuntimeError("local_only execution scope requires a colony execution")
-        return (
-            self._launch_chat(session, prompt, direct_opencrab=direct_opencrab)
-            if kind == "chat"
-            else self._launch_colony(
-                session,
-                prompt,
-                preloaded_opencrab_context=preloaded_opencrab_context,
-                execution_scope=execution_scope,
-            )
+        if kind == "chat":
+            return self._launch_chat(session, prompt, direct_opencrab=direct_opencrab)
+        result = self._launch_colony(
+            session,
+            prompt,
+            preloaded_opencrab_context=preloaded_opencrab_context,
+            execution_scope=execution_scope,
+            forced=mode if mode == "full" else "",
         )
+        # `full` is a one-shot opt-in. A five-role colony costs orders of
+        # magnitude more than the adaptive path, so a sticky session mode would
+        # keep spending it on every later prompt in that session. Consume it
+        # only once the mission actually launched; a rejected launch keeps it.
+        if mode == "full" and str(session.get("interaction_mode") or "") == "full":
+            self.service.store.update_session(str(session["session_id"]), interaction_mode="auto")
+            result = {**result, "full_pipeline_consumed": True}
+        return result
 
     def _interrupt(self, session_id: str) -> Dict[str, Any]:
         with self._state_lock:
@@ -1674,6 +1685,7 @@ class RuntimeServer(_RuntimeServerBase):
                     else self._knowledge_available(session)
                 ),
                 execution_scope=execution_scope,
+                forced="full" if str(session.get("interaction_mode") or "") == "full" else None,
             )
             return {"plan": plan.to_dict()}
         if action == "plan":
@@ -1683,6 +1695,7 @@ class RuntimeServer(_RuntimeServerBase):
                 token_budget=payload.get("token_budget"),
                 adaptive=True,
                 execution_scope=payload.get("execution_scope"),
+                forced=str(payload.get("forced") or "") or None,
             )
         if action == "run_demo":
             return self.service.run_demo(

@@ -332,6 +332,7 @@ def run(
     objective: str = typer.Argument(..., help="Mission objective."),
     demo: bool = typer.Option(False, "--demo", help="Use the zero-cost deterministic executor."),
     plan_only: bool = typer.Option(False, "--plan-only", help="Persist routes without invoking Codex."),
+    full: bool = typer.Option(False, "--full", help="Run the full KING->QUEEN->SOLDIER->WORKER->ORACLE colony; every role spends a model turn."),
     max_workers: int = typer.Option(3, min=1, max=8),
     workspace: Path = typer.Option(default_workspace(), "--workspace", "-w", resolve_path=True),
 ) -> None:
@@ -346,7 +347,12 @@ def run(
             session_id=session["session_id"],
         )
     elif plan_only:
-        result = client.request("plan", objective=objective, max_workers=max_workers)
+        result = client.request(
+            "plan",
+            objective=objective,
+            max_workers=max_workers,
+            forced="full" if full else "",
+        )
     else:
         session = client.request("session.ensure")
         session = client.request(
@@ -358,7 +364,7 @@ def run(
             cli_policy=str(session.get("cli_policy") or "auto"),
             max_workers=max_workers,
         )
-        queued = client.request("prompt.submit", session_id=session["session_id"], objective=objective, disposition="start", interaction="colony")
+        queued = client.request("prompt.submit", session_id=session["session_id"], objective=objective, disposition="start", interaction="full" if full else "colony")
         console.print("[bold green]Mission submitted[/bold green] to session %s" % session["session_id"])
         console.print("Status: %s" % queued["status"])
         console.print("Open `crab` to watch, guide, queue, or interrupt it.")

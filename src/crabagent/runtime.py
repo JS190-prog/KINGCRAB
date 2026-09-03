@@ -56,6 +56,7 @@ class RuntimeService:
         session_id: Optional[str] = None,
         adaptive: bool = False,
         execution_scope: Optional[str] = None,
+        forced: Optional[str] = None,
     ) -> Dict[str, Any]:
         self.initialize()
         normalized_execution_scope = normalize_execution_scope(execution_scope)
@@ -79,6 +80,7 @@ class RuntimeService:
             selected_project_count=selected_project_count,
             knowledge_available=knowledge_available,
             execution_scope=normalized_execution_scope,
+            forced=forced,
         ) if adaptive else None
         effective_token_budget = token_budget
         if effective_token_budget is None and goal_plan is not None:
@@ -260,6 +262,8 @@ class RuntimeService:
 
     @staticmethod
     def _uses_local_gate(goal_plan: GoalPlan, role: Role) -> bool:
+        if goal_plan.full_pipeline:
+            return False
         if role is Role.KING:
             return not goal_plan.requires_model_planning
         if role is Role.SOLDIER:
