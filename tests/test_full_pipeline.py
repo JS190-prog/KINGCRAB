@@ -99,3 +99,44 @@ def test_a_plan_without_oracle_still_terminates(tmp_path: Path) -> None:
     finally:
         if session_id:
             server.dispatch({"action": "session.interrupt", "payload": {"session_id": session_id}})
+
+
+def test_host_worker_artifact_accepts_a_korean_filename() -> None:
+    """A Korean-language mission names its artifact in Korean."""
+    import json as _json
+
+    from crabagent.colony import _parse_host_worker_artifact_directive
+
+    directive = "HOST_WORKER_ARTIFACT_V1:" + _json.dumps(
+        {"relative_path": ".crabagent/artifacts/발표자료_계획서.md", "content": "본문\n"},
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    _cleaned, artifact = _parse_host_worker_artifact_directive("계획서를 저장합니다.\n" + directive)
+
+    assert artifact is not None
+    assert artifact["relative_path"] == ".crabagent/artifacts/발표자료_계획서.md"
+
+
+def test_host_worker_artifact_still_rejects_unsafe_names() -> None:
+    import json as _json
+
+    import pytest as _pytest
+
+    from crabagent.colony import _parse_host_worker_artifact_directive
+
+    unsafe = [
+        "../escape.md",                 # traversal
+        "sub/dir.md",                   # not a direct child
+        ".hidden.md",                   # leading dot
+        "mission-0001.md",              # reserved prefix
+        "name‮gnp.md",             # RTL override
+        "with space.md",                # space
+        "이름.exe",                      # suffix outside the allowlist
+    ]
+    for name in unsafe:
+        directive = "HOST_WORKER_ARTIFACT_V1:" + _json.dumps(
+            {"relative_path": ".crabagent/artifacts/" + name, "content": "x"},
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        with _pytest.raises(ValueError):
+            _parse_host_worker_artifact_directive(directive)

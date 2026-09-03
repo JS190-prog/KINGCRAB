@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -73,7 +74,20 @@ _HOST_WORKER_ARTIFACT_PREFIX = "HOST_WORKER_ARTIFACT_V1:"
 _HOST_WORKER_ARTIFACT_ROOT = ".crabagent/artifacts/"
 _HOST_WORKER_ARTIFACT_MAX_BYTES = 16 * 1024
 _HOST_WORKER_ARTIFACT_SUFFIXES = frozenset({".md", ".txt", ".json"})
-_HOST_WORKER_ARTIFACT_FILENAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+# The allowlist used to be ASCII letters only, which rejected every Korean
+# artifact name a Korean-language mission naturally produces. str.isalnum() is
+# Unicode-aware, so Hangul and CJK names pass while the characters that make a
+# filename unsafe -- control, format (RTL override), surrogate, and every space
+# character -- still do not. Separators, a leading dot, and the mission- prefix
+# stay banned below.
+_HOST_WORKER_ARTIFACT_FILENAME_EXTRA = frozenset("-_.")
+# A Hangul character costs three UTF-8 bytes, so a 128-character name can still
+# exceed a filesystem's 255-byte limit.
+_HOST_WORKER_ARTIFACT_NAME_MAX_BYTES = 200
+
+
+def _is_safe_host_worker_filename_char(character: str) -> bool:
+    return character.isalnum() or character in _HOST_WORKER_ARTIFACT_FILENAME_EXTRA
 _HOST_WORKER_CODE_FENCE_PREFIXES = ("```", "~~~")
 
 
@@ -113,15 +127,18 @@ def _parse_host_worker_artifact_directive(text: str) -> tuple[str, Optional[Dict
         raise ValueError("HOST_WORKER_ARTIFACT_V1 content must be non-empty UTF-8 text")
     if not relative_path.startswith(_HOST_WORKER_ARTIFACT_ROOT):
         raise ValueError("HOST_WORKER_ARTIFACT_V1 path must be under .crabagent/artifacts")
-    filename = relative_path[len(_HOST_WORKER_ARTIFACT_ROOT):]
+    # Normalize before validating and before use: two spellings of the same
+    # Hangul name must not become two different files on disk.
+    filename = unicodedata.normalize("NFC", relative_path[len(_HOST_WORKER_ARTIFACT_ROOT):])
     if (
         not filename
         or len(filename) > 128
+        or len(filename.encode("utf-8")) > _HOST_WORKER_ARTIFACT_NAME_MAX_BYTES
         or filename.startswith(".")
         or filename.startswith("mission-")
         or "/" in filename
         or "\\" in filename
-        or any(character not in _HOST_WORKER_ARTIFACT_FILENAME_CHARS for character in filename)
+        or any(not _is_safe_host_worker_filename_char(character) for character in filename)
     ):
         raise ValueError("HOST_WORKER_ARTIFACT_V1 requires one safe direct-child artifact filename")
     if Path(filename).suffix.lower() not in _HOST_WORKER_ARTIFACT_SUFFIXES:
