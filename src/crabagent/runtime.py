@@ -57,6 +57,7 @@ class RuntimeService:
         adaptive: bool = False,
         execution_scope: Optional[str] = None,
         forced: Optional[str] = None,
+        retrieval_mode: str = "auto",
     ) -> Dict[str, Any]:
         self.initialize()
         normalized_execution_scope = normalize_execution_scope(execution_scope)
@@ -68,9 +69,9 @@ class RuntimeService:
             selected_pack_count = len(context.get("package_ids") or [])
             selected_project_count = len(context.get("project_ids") or [])
             session = self.store.session(session_id) or {}
-            knowledge_available = opencrab_is_configured(
-                self.workspace,
-                str(session.get("mcp_policy") or "auto"),
+            knowledge_available = (
+                opencrab_is_configured(self.workspace, str(session.get("mcp_policy") or "auto"))
+                if retrieval_mode == "auto" else False
             )
         else:
             knowledge_available = False
@@ -81,6 +82,7 @@ class RuntimeService:
             knowledge_available=knowledge_available,
             execution_scope=normalized_execution_scope,
             forced=forced,
+            retrieval_mode=retrieval_mode,
         ) if adaptive else None
         effective_token_budget = token_budget
         if effective_token_budget is None and goal_plan is not None:
@@ -420,8 +422,9 @@ class RuntimeService:
         directory = self.store.artifacts_dir / mission_id
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / filename
-        path.write_text(content, encoding="utf-8")
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        encoded = content.encode("utf-8")
+        path.write_bytes(encoded)
+        digest = hashlib.sha256(encoded).hexdigest()
         artifact = Artifact(
             artifact_id=new_id("artifact"),
             mission_id=mission_id,

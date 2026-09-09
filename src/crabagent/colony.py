@@ -239,6 +239,9 @@ class ColonyExecutor:
         retry_of: str = "",
         execution_scope: str = "",
         forced: str = "",
+        retrieval_mode: str = "auto",
+        opencrab_handoff: Optional[Dict[str, Any]] = None,
+        continuation_of: str = "",
     ) -> None:
         self.service = service
         self.store = service.store
@@ -247,6 +250,9 @@ class ColonyExecutor:
         self.cancel_event = cancel_event
         self.on_runtime_request = on_runtime_request
         self.opencrab_context_loader = opencrab_context_loader
+        self.retrieval_mode = retrieval_mode
+        self.opencrab_handoff = opencrab_handoff
+        self.continuation_of = continuation_of
         self.observed_tokens: Optional[int] = None
         self.opencrab_delta = load_diff(self.service.workspace)
         self.ontology_context = self.store.ontology_context(session_id)
@@ -1116,9 +1122,27 @@ class ColonyExecutor:
             adaptive=True,
             execution_scope=self.execution_scope,
             forced=self.forced or None,
+            retrieval_mode=self.retrieval_mode,
         )
         mission_id = str(planned["mission"]["mission_id"])
         self.goal_plan = dict(planned.get("goal_plan") or {})
+        king_task = next(row for row in planned["tasks"] if row["role"] == Role.KING.value)
+        if self.opencrab_handoff is not None:
+            # Persist the exact gateway handoff, including prefetched graphs
+            # and scope provenance, before the first model turn. The normalized
+            # Queen receipt is not a replacement for this execution input.
+            self.service._write_artifact(
+                mission_id, king_task["task_id"], "opencrab_handoff.json",
+                json.dumps(self.opencrab_handoff, ensure_ascii=False, indent=2) + "\n",
+                "opencrab_handoff",
+            )
+        if self.continuation_of:
+            self.store.append_event(
+                mission_id, "mission_continuation_bound", "RUNTIME",
+                {"source_mission_id": self.continuation_of,
+                 "retrieval_mode": self.retrieval_mode,
+                 "opencrab_context_reused": self.opencrab_handoff is not None},
+            )
         if self.execution_scope == EXECUTION_SCOPE_LOCAL_ONLY:
             forbidden_stages = {
                 str(stage).upper()

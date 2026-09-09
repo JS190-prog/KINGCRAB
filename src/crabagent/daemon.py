@@ -47,6 +47,7 @@ RUNTIME_CAPABILITIES = (
     "mission.pending_requests",
     "mission.host_turn",
     "mission.execution_scope",
+    "mission.context_handoff",
 )
 MISSION_SUMMARY_FIELDS = (
     "mission_id",
@@ -408,7 +409,12 @@ class RuntimeServer(_RuntimeServerBase):
             self.service.store.mark_input(str(next_input["queue_id"]), "delivered")
             refreshed = self.service.store.session(session_id)
             if refreshed:
-                self._dispatch(refreshed, str(next_input["content"]))
+                sources = self.service.store.missions_for_session(session_id, limit=1)
+                self._dispatch(
+                    refreshed, str(next_input["content"]),
+                    source_mission_id=(str(sources[0]["mission_id"])
+                                       if sources and refreshed.get("executor_policy") == "host" else ""),
+                )
 
     @staticmethod
     def _bounded_preloaded_opencrab_context(value: Any) -> Optional[Dict[str, Any]]:
@@ -437,6 +443,8 @@ class RuntimeServer(_RuntimeServerBase):
         preloaded_opencrab_context: Optional[Dict[str, Any]] = None,
         execution_scope: str = "",
         forced: str = "",
+        retrieval_mode: str = "auto",
+        continuation_of: str = "",
     ) -> Dict[str, Any]:
         execution_scope = normalize_execution_scope(execution_scope)
         if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY and preloaded_opencrab_context is not None:
@@ -472,6 +480,9 @@ class RuntimeServer(_RuntimeServerBase):
                         retry_of=retry_of,
                         execution_scope=execution_scope,
                         forced=forced,
+                        retrieval_mode=retrieval_mode,
+                        opencrab_handoff=preloaded_opencrab_context,
+                        continuation_of=continuation_of,
                     )
                     executor.run(
                         objective,
@@ -492,7 +503,75 @@ class RuntimeServer(_RuntimeServerBase):
             "retry_of": retry_of or None,
             "execution_scope": execution_scope,
             "forced": forced or None,
+            "source_mission_id": continuation_of or None,
+            "retrieval_mode": retrieval_mode,
+            "opencrab_context_reused": bool(continuation_of and preloaded_opencrab_context is not None),
         }
+
+    def _continuation_handoff(self, session_id: str, mission_id: str) -> Dict[str, Any]:
+        """Recover verified execution inputs from the exact source mission.
+
+        Session pack selections alone are not a connection or an evidence
+        receipt. A gateway-origin continuation must never discover a different
+        OpenCrab endpoint from the daemon user's Codex configuration.
+        """
+        source = self.service.store.mission(mission_id)
+        if source is None or str(source.get("session_id") or "") != session_id:
+            raise RuntimeError("continuation source does not belong to this session")
+        latest = self.service.store.missions_for_session(session_id, limit=1)
+        if not latest or str(latest[0]["mission_id"]) != mission_id:
+            raise RuntimeError("continuation source is stale; resolve the latest mission")
+        detail = self.service.store.inspect(mission_id)
+        plan = detail.get("goal_plan") or {}
+        scope = normalize_execution_scope(source.get("execution_scope") or plan.get("execution_scope"))
+        context = None
+        for kind in ("opencrab_handoff", "mcp_context_receipt"):
+            artifacts = [row for row in detail.get("artifacts") or [] if row.get("kind") == kind]
+            if not artifacts:
+                continue
+            artifact = artifacts[-1]
+            path = Path(str(artifact.get("path") or "")).resolve()
+            root = (self.workspace / ".crabagent" / "artifacts" / mission_id).resolve()
+            if root not in path.parents:
+                raise RuntimeError("continuation context artifact escaped the source mission")
+            try:
+                raw = path.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != artifact.get("sha256"):
+                    raise RuntimeError("continuation context artifact digest mismatch")
+                candidate = self._bounded_preloaded_opencrab_context(json.loads(raw))
+            except (OSError, ValueError, TypeError) as exc:
+                raise RuntimeError("continuation context is unreadable or unsuccessful") from exc
+            if candidate is None or candidate.get("authority") != "gateway_verified_mcp_response":
+                continue
+            context = candidate
+            break
+        if scope == EXECUTION_SCOPE_LOCAL_ONLY and context is not None:
+            raise RuntimeError("local_only continuation cannot inherit OpenCrab context")
+        if plan.get("ontology_required") and context is None:
+            # Explicit gateway continuations have no live-runtime credential
+            # fallback. A caller can start a newly scoped execute preflight.
+            raise RuntimeError("continuation requires the source OpenCrab handoff; run a scoped evidence preflight")
+        if context is not None:
+            selected = self.service.store.ontology_context(session_id)
+            bound_scope = context.get("pack_scope") or {}
+            for key in ("project_ids", "package_ids"):
+                bound = {str(value) for value in bound_scope.get(key) or []}
+                current = {str(value) for value in selected.get(key) or []}
+                if bound and current and not current.issubset(bound):
+                    raise RuntimeError("continuation context scope changed; run a new scoped preflight")
+        mode = "none" if context is None else "graph_path" if plan.get("graph_required") else "evidence_first"
+        if mode == "graph_path" and context is not None and not context.get("gateway_graph") and not context.get("gateway_graphs"):
+            # Compatibility for already-completed releases that persisted only
+            # the normalized receipt, not the original graph handoff.
+            if context.get("graph_gate") != "pass" or not context.get("nodes") or not context.get("edges"):
+                raise RuntimeError("continuation requires a verified graph handoff")
+            context = dict(context)
+            context["gateway_graph"] = {
+                "authority": "gateway_verified_mcp_response", "status": "ok",
+                "nodes": context["nodes"], "edges": context["edges"], "tool_calls": [],
+            }
+        return {"preloaded_opencrab_context": context, "execution_scope": scope,
+                "retrieval_mode": mode, "forced": "full" if plan.get("full_pipeline") else ""}
 
     def _retry_last_mission(self, session: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:
         """Retry only a failed, non-writing mission without duplicating edits."""
@@ -528,7 +607,8 @@ class RuntimeServer(_RuntimeServerBase):
                 "retry blocked: the previous mission changed %d file(s); review the workspace or use /retry force" % changed_files
             )
 
-        context_artifacts = [
+        handoff_artifacts = [artifact for artifact in (detail.get("artifacts") or []) if artifact.get("kind") == "opencrab_handoff"]
+        context_artifacts = handoff_artifacts or [
             artifact
             for artifact in (detail.get("artifacts") or [])
             if str(artifact.get("kind") or "") == "mcp_context_receipt"
@@ -538,7 +618,7 @@ class RuntimeServer(_RuntimeServerBase):
         if context_artifacts:
             if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY:
                 raise RuntimeError("retry blocked: local_only mission cannot reuse OpenCrab context")
-            receipt = self._artifact_payload(detail, "mcp_context_receipt")
+            receipt = self._artifact_payload(detail, "opencrab_handoff" if handoff_artifacts else "mcp_context_receipt")
             if not receipt:
                 raise RuntimeError("retry blocked: previous OpenCrab context receipt is unreadable")
             opencrab_context_status = str(receipt.get("status") or "").strip().lower()
@@ -546,7 +626,11 @@ class RuntimeServer(_RuntimeServerBase):
                 raise RuntimeError("retry blocked: previous OpenCrab context receipt has no status")
             if opencrab_context_status in {"ok", "no_evidence", "cached"}:
                 try:
-                    preloaded_opencrab_context = self._bounded_preloaded_opencrab_context(receipt)
+                    preloaded_opencrab_context = (
+                        self._continuation_handoff(session_id, source_mission_id)["preloaded_opencrab_context"]
+                        if receipt.get("authority") == "gateway_verified_mcp_response"
+                        else self._bounded_preloaded_opencrab_context(receipt)
+                    )
                 except ValueError as exc:
                     raise RuntimeError(
                         "retry blocked: previous OpenCrab context receipt is invalid: %s" % exc
@@ -578,6 +662,7 @@ class RuntimeServer(_RuntimeServerBase):
             preloaded_opencrab_context=preloaded_opencrab_context,
             execution_scope=execution_scope,
             forced="full" if source_goal_plan.get("full_pipeline") else "",
+            retrieval_mode=str(source_goal_plan.get("retrieval_mode") or "auto"),
         )
 
     @staticmethod
@@ -780,7 +865,7 @@ class RuntimeServer(_RuntimeServerBase):
                 "RUNTIME",
                 {"session_id": session_id, "prompt": prompt, "intent": intent},
             )
-            return self._launch_colony(session, objective, retry_of=mission_id)
+            return self._retry_last_mission(session)
         return None
 
     def _knowledge_available(self, session: Dict[str, Any]) -> bool:
@@ -873,6 +958,8 @@ class RuntimeServer(_RuntimeServerBase):
         direct_opencrab: bool = False,
         preloaded_opencrab_context: Optional[Dict[str, Any]] = None,
         execution_scope: str = "",
+        retrieval_mode: str = "auto",
+        source_mission_id: str = "",
     ) -> Dict[str, Any]:
         execution_scope = normalize_execution_scope(execution_scope)
         if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY and direct_opencrab:
@@ -882,7 +969,16 @@ class RuntimeServer(_RuntimeServerBase):
             if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY:
                 raise RuntimeError("local_only execution scope cannot continue an existing mission")
             return continuation
-        mode = explicit or str(session.get("interaction_mode") or "auto")
+        inherited_forced = ""
+        if source_mission_id:
+            inherited = self._continuation_handoff(str(session["session_id"]), source_mission_id)
+            if preloaded_opencrab_context is not None:
+                raise RuntimeError("continuation cannot replace its source evidence handoff")
+            preloaded_opencrab_context = inherited["preloaded_opencrab_context"]
+            execution_scope = inherited["execution_scope"]
+            retrieval_mode = inherited["retrieval_mode"]
+            inherited_forced = inherited["forced"]
+        mode = explicit or ("colony" if source_mission_id else str(session.get("interaction_mode") or "auto"))
         context = self.service.store.ontology_context(str(session.get("session_id") or ""))
         kind = interaction_kind(
             prompt,
@@ -891,7 +987,7 @@ class RuntimeServer(_RuntimeServerBase):
             selected_project_count=len(context.get("project_ids") or []),
             knowledge_available=(
                 False
-                if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY
+                if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY or retrieval_mode != "auto"
                 else self._knowledge_available(session)
             ),
         )
@@ -904,7 +1000,9 @@ class RuntimeServer(_RuntimeServerBase):
             prompt,
             preloaded_opencrab_context=preloaded_opencrab_context,
             execution_scope=execution_scope,
-            forced=mode if mode == "full" else "",
+            forced=mode if mode == "full" else inherited_forced,
+            retrieval_mode=retrieval_mode,
+            continuation_of=source_mission_id,
         )
         # `full` is a one-shot opt-in. A five-role colony costs orders of
         # magnitude more than the adaptive path, so a sticky session mode would
@@ -1608,6 +1706,20 @@ class RuntimeServer(_RuntimeServerBase):
             with self._state_lock:
                 running = bool(self._jobs.get(session_id) and self._jobs[session_id].is_alive())
             preloaded_opencrab_context = self._bounded_preloaded_opencrab_context(payload.get("opencrab_context"))
+            retrieval_mode = str(payload.get("retrieval_mode") or "auto")
+            source_mission_id = str(payload.get("source_mission_id") or "")
+            if source_mission_id:
+                source = self.service.store.mission(source_mission_id)
+                latest = self.service.store.missions_for_session(session_id, limit=1)
+                if source is None or source.get("session_id") != session_id or not latest or latest[0]["mission_id"] != source_mission_id:
+                    raise RuntimeError("continuation source is missing, stale, or belongs to another session")
+            # Validate before the background thread can create a mission.
+            if retrieval_mode not in {"auto", "none", "evidence_first", "graph_path"}:
+                raise ValueError("unsupported retrieval_mode")
+            if retrieval_mode in {"evidence_first", "graph_path"} and preloaded_opencrab_context is None:
+                raise RuntimeError("remote retrieval mode requires an observed OpenCrab handoff")
+            if retrieval_mode == "none" and preloaded_opencrab_context is not None:
+                raise RuntimeError("retrieval_mode none cannot carry OpenCrab context")
             if execution_scope == EXECUTION_SCOPE_LOCAL_ONLY and preloaded_opencrab_context is not None:
                 raise RuntimeError("local_only execution scope cannot carry OpenCrab context")
             if running and preloaded_opencrab_context is not None:
@@ -1628,6 +1740,8 @@ class RuntimeServer(_RuntimeServerBase):
                 direct_opencrab=bool(payload.get("benchmark_direct")),
                 preloaded_opencrab_context=preloaded_opencrab_context,
                 execution_scope=execution_scope,
+                retrieval_mode=retrieval_mode,
+                source_mission_id=source_mission_id,
             )
         if action == "mission.retry":
             session = self._session(str(payload.get("session_id") or ""))

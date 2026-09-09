@@ -442,6 +442,7 @@ class GoalPlan:
     retrieval_contract: Dict[str, Any] = field(default_factory=dict)
     rationale: List[str] = field(default_factory=list)
     execution_scope: str = ""
+    retrieval_mode: str = "auto"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -455,6 +456,7 @@ def classify_goal(
     knowledge_available: bool = False,
     forced: Optional[str] = None,
     execution_scope: Optional[str] = None,
+    retrieval_mode: str = "auto",
 ) -> GoalPlan:
     """Compile a user goal into a minimal executable colony graph.
 
@@ -463,8 +465,13 @@ def classify_goal(
     """
     clean = " ".join(str(objective or "").split())
     scope = normalize_execution_scope(execution_scope)
+    retrieval_mode = str(retrieval_mode or "auto").strip().lower()
+    if retrieval_mode not in {"auto", "none", "evidence_first", "graph_path"}:
+        raise ValueError("unsupported retrieval_mode")
+    if scope == EXECUTION_SCOPE_LOCAL_ONLY and retrieval_mode not in {"auto", "none"}:
+        raise ValueError("local_only execution scope cannot require OpenCrab retrieval")
     if scope == EXECUTION_SCOPE_LOCAL_ONLY:
-        if not _request_disables_evidence_lookup(clean) or _request_requests_evidence_first(clean):
+        if (retrieval_mode != "none" and not _request_disables_evidence_lookup(clean)) or _request_requests_evidence_first(clean):
             raise ValueError(
                 "local_only execution_scope requires an explicit request to skip evidence/OpenCrab lookup"
             )
@@ -504,6 +511,11 @@ def classify_goal(
     )
     contextual_ontology = selected_context_ontology or ambient_knowledge
     ontology = _contains(signal_text, ONTOLOGY_SIGNALS) or contextual_ontology
+    # A remote gateway already resolved the user's retrieval constraints and
+    # authenticated evidence scope. Do not reinterpret document prose or an
+    # ambient session selection as a different dependency at execution time.
+    if retrieval_mode != "auto":
+        ontology = retrieval_mode != "none"
     explicit_write = _explicit_boolean_contract(text, "requires_write")
     explicit_read_only = _explicit_boolean_contract(text, "read_only")
     writes = _contains_write_intent(text)
@@ -535,6 +547,9 @@ def classify_goal(
         graph_required = False
     else:
         graph_required = ontology and _contains_graph_signal(signal_text)
+
+    if retrieval_mode != "auto":
+        graph_required = retrieval_mode == "graph_path"
 
     if forced in {"chat", "colony", "full"}:
         forced_colony = forced in {"colony", "full"}
@@ -796,6 +811,7 @@ def classify_goal(
         response_contract=response_contract,
         stages=stages,
         full_pipeline=full_pipeline,
+        retrieval_mode=retrieval_mode,
         ontology_spaces=spaces,
         ontology_mode=(
             "graph_path"
