@@ -1145,7 +1145,7 @@ class ColonyStore:
     def cancel_active_mission(self, mission_id: str, reason: str) -> None:
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT status FROM missions WHERE mission_id = ?", (mission_id,)
+                "SELECT status, session_id FROM missions WHERE mission_id = ?", (mission_id,)
             ).fetchone()
             if row is None:
                 raise ValueError("unknown mission: %s" % mission_id)
@@ -1154,6 +1154,11 @@ class ColonyStore:
             connection.execute(
                 "UPDATE missions SET status = ?, updated_at = ? WHERE mission_id = ?",
                 (MissionStatus.CANCELLED.value, utc_now(), mission_id),
+            )
+            connection.execute(
+                "UPDATE sessions SET status = 'ready', active_mission_id = NULL, updated_at = ? "
+                "WHERE session_id = ? AND active_mission_id = ?",
+                (utc_now(), row['session_id'], mission_id),
             )
             self.append_event(
                 mission_id,
@@ -1275,10 +1280,13 @@ class ColonyStore:
             result.append(item)
         return result
 
-    def transition_mission(self, mission_id: str, target: MissionStatus, actor: Role) -> None:
+    def transition_mission(
+        self, mission_id: str, target: MissionStatus, actor: Role,
+        *, codex_thread_id: Optional[str] = None,
+    ) -> None:
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT status FROM missions WHERE mission_id = ?", (mission_id,)
+                "SELECT status, session_id FROM missions WHERE mission_id = ?", (mission_id,)
             ).fetchone()
             if row is None:
                 raise ValueError("unknown mission: %s" % mission_id)
@@ -1290,6 +1298,16 @@ class ColonyStore:
                 "UPDATE missions SET status = ?, updated_at = ? WHERE mission_id = ?",
                 (target.value, now, mission_id),
             )
+            if target in {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED}:
+                # Readers must not observe a terminal mission with a live
+                # session binding. Release ownership in the same transaction,
+                # and never let a late old executor clear a newer mission.
+                connection.execute(
+                    "UPDATE sessions SET status = 'ready', active_mission_id = NULL, "
+                    "codex_thread_id = COALESCE(?, codex_thread_id), updated_at = ? "
+                    "WHERE session_id = ? AND active_mission_id = ?",
+                    (codex_thread_id, now, row['session_id'], mission_id),
+                )
             self.append_event(
                 mission_id,
                 "mission_%s" % target.value,

@@ -1455,12 +1455,13 @@ class ColonyExecutor:
                 )
                 task_index += 1
             current = self.store.inspect(mission_id)["mission"]
+            thread_id = str(getattr(self.bridge, "thread_id", "") or "")
             if current["status"] == MissionStatus.VERIFYING.value:
                 oracle_snapshot = self.store.inspect(mission_id)
                 if oracle_snapshot["mission"].get("oracle_result_artifact_id"):
-                    self.store.transition_mission(mission_id, MissionStatus.COMPLETED, Role.ORACLE)
+                    self.store.transition_mission(mission_id, MissionStatus.COMPLETED, Role.ORACLE, codex_thread_id=thread_id)
                 else:
-                    self.store.transition_mission(mission_id, MissionStatus.FAILED, Role.ORACLE)
+                    self.store.transition_mission(mission_id, MissionStatus.FAILED, Role.ORACLE, codex_thread_id=thread_id)
                     self.store.add_message(
                         self.session_id,
                         "system",
@@ -1468,9 +1469,6 @@ class ColonyExecutor:
                         mission_id,
                         {"error": "oracle_gate_rejected"},
                     )
-                self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
-            elif current["status"] == MissionStatus.CANCELLED.value:
-                self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
             elif current["status"] == MissionStatus.RUNNING.value:
                 # Only an ORACLE task moves a mission into VERIFYING, so a plan
                 # compiled without one never reached the terminal branch above:
@@ -1480,8 +1478,7 @@ class ColonyExecutor:
                 # RUNNING -> COMPLETED is not a legal edge; go through VERIFYING
                 # exactly as an ORACLE-bearing plan does.
                 self.store.transition_mission(mission_id, MissionStatus.VERIFYING, Role.KING)
-                self.store.transition_mission(mission_id, MissionStatus.COMPLETED, Role.KING)
-                self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
+                self.store.transition_mission(mission_id, MissionStatus.COMPLETED, Role.KING, codex_thread_id=thread_id)
             self.store.set_budget(
                 Budget(
                     mission_id=mission_id,
@@ -1504,12 +1501,11 @@ class ColonyExecutor:
         except Exception as exc:
             current = self.store.inspect(mission_id)["mission"]
             if current["status"] in {MissionStatus.RUNNING.value, MissionStatus.VERIFYING.value}:
-                self.store.transition_mission(mission_id, MissionStatus.FAILED, Role.ORACLE)
+                self.store.transition_mission(mission_id, MissionStatus.FAILED, Role.ORACLE, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
             reason = str(exc)
             if reason.startswith("OpenCrab MCP") or reason.startswith("OpenCrab graph gate") or reason.startswith("Oracle ontology gate"):
                 self._record_blocked_oracle_outcome(mission_id, objective, active_task, reason)
             self.store.add_message(self.session_id, "system", "Mission failed: %s" % exc, mission_id, {"error": type(exc).__name__})
-            self.store.update_session(self.session_id, status="ready", active_mission_id=None, codex_thread_id=str(getattr(self.bridge, "thread_id", "") or ""))
             self._persist_kinetic_state(
                 mission_id,
                 str((active_task or {}).get("task_id") or ""),

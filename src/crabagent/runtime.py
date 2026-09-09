@@ -390,12 +390,6 @@ class RuntimeService:
             )
         )
         self.store.transition_mission(mission_id, MissionStatus.COMPLETED, Role.ORACLE)
-        if session_id:
-            self.store.update_session(
-                session_id,
-                status="ready",
-                active_mission_id=None,
-            )
         return self.store.inspect(mission_id)
 
     def status(self) -> Dict[str, Any]:
