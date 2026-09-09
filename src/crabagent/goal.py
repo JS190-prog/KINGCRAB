@@ -403,6 +403,10 @@ def _contains_write_intent(text: str) -> bool:
         scrubbed = re.sub(pattern, " ", scrubbed, flags=re.IGNORECASE)
     for pattern in READ_ONLY_CHANGE_CONTEXTS:
         scrubbed = re.sub(pattern, " ", scrubbed, flags=re.IGNORECASE)
+    # A declarative request to create a file is a persisted deliverable.
+    # Merely creating a mission or composing a table in the response is not.
+    if re.search(r"파일(?:을|를)?[^\n!?;]{0,240}(?:작성|생성)한다", scrubbed):
+        return True
     return _contains(scrubbed, WRITE_SIGNALS)
 
 

@@ -9,6 +9,20 @@ from crabagent.goal import classify_goal
 from crabagent.protocol import runtime_paths
 
 
+@pytest.mark.parametrize("verb", ["작성한다", "생성한다"])
+def test_korean_declarative_deliverable_keeps_worker_write_scope(verb):
+    objective = f"Core 근거의 출처를 확인한다. WORKER는 새 검증 파일 .crabagent/artifacts/probe.md 한 개를 {verb}. 그 밖의 파일과 외부 데이터는 변경하지 않는다."
+    plan = classify_goal(objective, forced="full", retrieval_mode="evidence_first")
+    assert plan.requires_write is True
+    assert plan.action_mode == "execute"
+    assert "WORKER" in plan.stages and "ORACLE" in plan.stages
+
+
+def test_korean_declarative_negated_write_stays_read_only():
+    plan = classify_goal("Core 근거를 확인한다. 파일을 작성하지 않는다.", retrieval_mode="evidence_first")
+    assert plan.requires_write is False
+
+
 @pytest.fixture
 def server(tmp_path):
     paths = runtime_paths(tmp_path)
