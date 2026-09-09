@@ -30,7 +30,11 @@ def _items(value: Any, limit: int = 8) -> List[str]:
 
 
 def _section(text: str, name: str, names: Iterable[str]) -> str:
-    match = re.search(r"(?:^|\n)\s*%s\s*\n?" % re.escape(name), text, flags=re.IGNORECASE)
+    def heading(label: str) -> str:
+        return (r"(?:^|\n)[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*|__)?%s(?:\*\*|__)?[ \t]*"
+                r"(?::(?:\*\*|__)?[ \t]*|(?=\n|$))") % re.escape(label)
+
+    match = re.search(heading(name), text, flags=re.IGNORECASE)
     if not match:
         return ""
     tail = text[match.end():]
@@ -38,7 +42,7 @@ def _section(text: str, name: str, names: Iterable[str]) -> str:
     for other in names:
         if other.lower() == name.lower():
             continue
-        candidate = re.search(r"(?:^|\n)\s*%s\s*\n?" % re.escape(other), tail, flags=re.IGNORECASE)
+        candidate = re.search(heading(other), tail, flags=re.IGNORECASE)
         if candidate:
             end = min(end, candidate.start())
     return tail[:end].strip()
