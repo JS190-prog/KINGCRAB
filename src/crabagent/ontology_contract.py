@@ -548,7 +548,10 @@ def update_decision_gate(contract: Dict[str, Any], text: str) -> Dict[str, Any]:
     )
     sections = {
         name.lower(): bool(
-            re.search(r"(?:^|\n)\s*%s\s*(?:\n|$)" % re.escape(name), value, re.IGNORECASE)
+            re.search(
+                r"(?:^|\n)[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*|__)?%s(?:\*\*|__)?[ \t]*(?::(?:\*\*|__)?[ \t]*[^\n]*|(?=\n|$))"
+                % re.escape(name), value, re.IGNORECASE,
+            )
         )
         for name in section_names
     }

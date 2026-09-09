@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from crabagent.goal import classify_goal
 from crabagent.goal_graph import compile_goal_graph
 from crabagent.ontology_contract import (
@@ -93,6 +95,22 @@ def test_decision_gate_stays_blocked_without_a_decision_section() -> None:
 
     assert contract["decision_gate"] == "blocked"
     assert contract["decision_slots"][0]["status"] == "missing"
+
+
+@pytest.mark.parametrize("heading", ["{name}:", "## {name}", "**{name}:**", "**{name}**:", "{name}: inline detail"])
+def test_host_decision_headings_accept_standard_markdown_and_colons(heading):
+    contract = {"decision_slots": [{"label": name, "required": True} for name in
+                                  ("selected_path", "bounded_change", "verification", "next_action")]}
+    text = "\n\n".join(heading.format(name=name) + "\nObserved detail." for name in
+                       ("SELECTED_PATH", "BOUNDED_CHANGE", "VERIFICATION", "NEXT_ACTION"))
+    update_decision_gate(contract, text)
+    assert contract["decision_gate"] == "pass"
+
+
+def test_decision_heading_names_embedded_in_prose_do_not_fill_slots():
+    contract = {"decision_slots": [{"label": "selected_path", "required": True}]}
+    update_decision_gate(contract, "This sentence mentions SELECTED_PATH: but is not a decision section.")
+    assert contract["decision_gate"] == "blocked"
 
 
 def test_execution_contract_promotes_to_identity_bound_ledger() -> None:

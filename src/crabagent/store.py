@@ -2067,6 +2067,7 @@ class ColonyStore:
         return {
             "mission": mission,
             "goal_plan": goal_plan,
+            "goal_outcome": artifact_json("goal_outcome"),
             "goal_graph": goal_graph,
             "kinetic_workflow": kinetic_workflow,
             "ontology_execution_contract": ontology_execution_contract,

@@ -1232,6 +1232,10 @@ class ColonyExecutor:
                     break
                 if role is Role.ORACLE:
                     self.store.transition_mission(mission_id, MissionStatus.VERIFYING, Role.ORACLE)
+                if role is Role.WORKER:
+                    # A malformed Queen handoff must stop before any worker
+                    # side effect, not only when Oracle begins after the write.
+                    self._enforce_ontology_contract_gate(mission_id)
                 if role is Role.SOLDIER and str(assignment.get("provider") or "") == "local":
                     artifact_id = self._run_soldier(mission_id, task, context)
                     context.append("SOLDIER receipt: %s" % artifact_id)
@@ -1640,7 +1644,7 @@ class ColonyExecutor:
         claims_present = bool(" ".join(claim_section.split()).strip(" -:"))
         next_action = ""
         if "NEXT_ACTION" in interpretation:
-            next_action = interpretation.split("NEXT_ACTION", 1)[1].strip().split("\n", 1)[0][:240]
+            next_action = interpretation.split("NEXT_ACTION", 1)[1].lstrip(" \t\r\n:*_").split("\n", 1)[0][:240]
         action_required = bool(self.goal_plan.get("action_required"))
         actionable_next_action = bool(next_action.strip()) and next_action.strip().upper() not in {"STOP", "NONE"}
         return {

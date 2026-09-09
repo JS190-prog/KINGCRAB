@@ -208,3 +208,54 @@ def test_durable_followup_reaches_oracle_without_any_runtime_opencrab_client(ser
     assert source != followup
     event = next(e for e in server.service.store.events(followup) if e.event_type == "mission_continuation_bound")
     assert event.payload["source_mission_id"] == source
+
+
+@pytest.mark.parametrize("valid_handoff", [True, False])
+def test_host_queen_heading_gate_is_enforced_before_worker_mutation(server, valid_handoff):
+    import threading
+    from crabagent.colony import ColonyExecutor
+    from crabagent.codex_app_server import CodexLiveTurn
+
+    session = server.service.store.create_session(executor_policy="host", model_policy="host", interaction_mode="colony")
+    target = server.workspace / ".crabagent" / "artifacts" / "heading-check.md"
+    roles = []
+    queen = ("SELECTED_PATH:\nUse observed evidence ev-heading-1234.\n"
+             "SUPPORTED_CLAIMS:\nThe source receipt contains ev-heading-1234.\n"
+             "GAPS:\nNo provenance gap.\nNEXT_ACTION:\nWrite the single scoped artifact.") if valid_handoff else "No structured decision handoff."
+
+    class Bridge:
+        thread_id = "host-heading-regression"
+        last_start_mode = "started"
+        executor_name = "host_current_model"
+        last_reported_model = "test-fixture"
+
+        def start(self):
+            return self.thread_id
+
+        def run_turn(self, prompt, emit, **kwargs):
+            role = prompt.splitlines()[0].rsplit(" ", 1)[-1]
+            roles.append(role)
+            if role == "WORKER":
+                result = 'HOST_WORKER_ARTIFACT_V1:{"relative_path":".crabagent/artifacts/heading-check.md","content":"observed test artifact\\n"}'
+            elif role == "QUEEN":
+                result = queen
+            else:
+                result = "GOAL_RESTATEMENT\nCreate the bounded artifact.\nSUBGOALS\nUse observed source.\nCONSTRAINTS\nOne file.\nSUCCESS_CHECKS\nFile receipt.\nNEXT_ACTION\nProceed within the bound."
+            return CodexLiveTurn(thread_id=self.thread_id, turn_id="turn-" + role, status="completed",
+                                 text=result, usage={}, started_at="now", finished_at="now")
+
+    context = {"status": "ok", "authority": "gateway_verified_mcp_response", "claim_gate": "pass",
+               "graph_gate": "not_required", "evidence_count": 1, "tool_calls": [],
+               "evidence": [{"id": "ev-heading-1234", "source": "opencrab://test/source", "text": "Observed source record."}]}
+    snapshot = ColonyExecutor(server.service, session["session_id"], Bridge(), threading.Event(),
+                              opencrab_context_loader=lambda args: context, opencrab_handoff=context,
+                              forced="full", retrieval_mode="evidence_first").run("Use evidence and create one bounded artifact", max_workers=1)
+    if valid_handoff:
+        assert snapshot["mission"]["status"] == "completed"
+        assert "ORACLE" in roles
+        assert target.read_text(encoding="utf-8") == "observed test artifact\n"
+    else:
+        assert snapshot["mission"]["status"] == "failed"
+        assert "WORKER" not in roles
+        assert not target.exists()
+        assert not any(row["tool_name"] == "host.worker.artifact.write" for row in snapshot["tool_receipts"])
