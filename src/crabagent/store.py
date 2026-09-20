@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -2005,9 +2006,26 @@ class ColonyStore:
             ).fetchall()
         return [self._mission_row(row) for row in rows]
 
-    def recent_missions(self, limit: int = 20, session_id: str = "") -> List[Dict[str, Any]]:
+    def recent_missions(self, limit: int = 20, session_id: str = "", objective_token: str = "") -> List[Dict[str, Any]]:
         """Return bounded mission history ordered by most recent durable activity."""
         bounded = max(1, min(int(limit), 100))
+        if objective_token:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}", objective_token):
+                raise ValueError("invalid exact objective token")
+            pattern = re.compile(r"(?<![A-Za-z0-9_.:-])" + re.escape(objective_token) + r"(?![A-Za-z0-9_:-])")
+            with self.connection() as connection:
+                rows = connection.execute(
+                    "SELECT * FROM missions WHERE instr(objective, ?) > 0 "
+                    "AND (? = '' OR session_id = ?) ORDER BY updated_at DESC",
+                    (objective_token, session_id, session_id),
+                )
+                matched = []
+                for row in rows:
+                    if pattern.search(str(row["objective"])):
+                        matched.append(self._mission_row(row))
+                        if len(matched) >= bounded:
+                            break
+                return matched
         with self.connection() as connection:
             if session_id:
                 rows = connection.execute(

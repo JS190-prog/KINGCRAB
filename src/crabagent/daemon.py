@@ -44,6 +44,7 @@ from .workspace_defaults import default_workspace, is_legacy_tb_scratch_root
 RUNTIME_API_VERSION = "kingcrab-runtime/1"
 RUNTIME_CAPABILITIES = (
     "mission.list",
+    "mission.identifier_search",
     "mission.summary",
     "mission.pending_requests",
     "mission.host_turn",
@@ -1534,6 +1535,14 @@ class RuntimeServer(_RuntimeServerBase):
                 session_id=session_id,
             )
             return {"missions": [_mission_summary(row) for row in rows]}
+        if action == "mission.search":
+            session_id = str(payload.get("session_id") or "").strip()
+            objective_token = str(payload.get("objective_token") or "").strip()
+            if not session_id and not objective_token:
+                raise ValueError("an exact mission identifier is required")
+            limit = max(2, min(int(payload.get("limit") or 20), 100))
+            rows = self.service.store.recent_missions(limit=limit, session_id=session_id, objective_token=objective_token)
+            return {"missions": [_mission_summary(row) for row in rows], "search_complete": len(rows) < limit}
         if action == "mission.summary":
             mission_id = str(payload.get("mission_id") or "").strip()
             if not mission_id:
