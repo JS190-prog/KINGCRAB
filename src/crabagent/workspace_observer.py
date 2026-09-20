@@ -121,3 +121,27 @@ def diff_workspace(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, A
         "changed_files_truncated": len(rows) > _MAX_CHANGED_ROWS,
         "observed": True,
     }
+
+
+def verify_workspace_change(root: Path, receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-read the claimed final bytes before Oracle accepts a write outcome."""
+    rows = receipt.get("changed_files")
+    issues = []
+    if receipt.get("observed") is not True or receipt.get("changed_files_truncated") or not isinstance(rows, list) or not rows:
+        return {"passed": False, "issues": ["missing_or_incomplete_change_receipt"], "checked_files": 0}
+    if receipt.get("changed_file_count") != len(rows):
+        issues.append("change_count_mismatch")
+    root = root.resolve()
+    for row in rows:
+        relative = str(row.get("path") or "")
+        target = root / relative
+        if not relative or Path(relative).is_absolute() or ".." in Path(relative).parts or not target.resolve().is_relative_to(root):
+            issues.append("unsafe_change_path")
+            continue
+        expected = row.get("after")
+        if row.get("status") == "deleted":
+            if expected is not None or target.exists() or target.is_symlink():
+                issues.append("deleted_path_still_present")
+        elif not isinstance(expected, str) or not expected.startswith("sha256:") or not target.is_file() or target.is_symlink() or _file_fingerprint(target) != expected:
+            issues.append("final_bytes_missing_or_changed")
+    return {"passed": not issues, "issues": issues, "checked_files": len(rows)}

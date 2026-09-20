@@ -407,7 +407,7 @@ def test_strategic_ontology_run_executes_subgoal_workers_before_oracle(tmp_path:
                     "NEXT_ACTION\nSTOP"
                 )
             else:
-                text = "FINAL_CONCLUSION\n근거와 하위 목표 영수증을 확인했다.\nNEXT_ACTION\nSTOP"
+                text = "VERDICT\nPASS\nFINAL_CONCLUSION\n근거와 하위 목표 영수증을 확인했다.\nNEXT_ACTION\nSTOP"
             return CodexLiveTurn(
                 thread_id=self.thread_id,
                 turn_id="turn-%d" % len(self.calls),

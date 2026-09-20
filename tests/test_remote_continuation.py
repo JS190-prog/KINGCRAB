@@ -239,6 +239,8 @@ def test_host_queen_heading_gate_is_enforced_before_worker_mutation(server, vali
                 result = 'HOST_WORKER_ARTIFACT_V1:{"relative_path":".crabagent/artifacts/heading-check.md","content":"observed test artifact\\n"}'
             elif role == "QUEEN":
                 result = queen
+            elif role == "ORACLE":
+                result = 'ORACLE_VERDICT_V1:{"verdict":"pass"}\nThe bounded artifact receipt passed verification.'
             else:
                 result = "GOAL_RESTATEMENT\nCreate the bounded artifact.\nSUBGOALS\nUse observed source.\nCONSTRAINTS\nOne file.\nSUCCESS_CHECKS\nFile receipt.\nNEXT_ACTION\nProceed within the bound."
             return CodexLiveTurn(thread_id=self.thread_id, turn_id="turn-" + role, status="completed",

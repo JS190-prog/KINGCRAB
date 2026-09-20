@@ -20,6 +20,7 @@ from .codex_app_server import CodexAppServerSession
 from .host_model import HostModelSession
 from .host_artifacts import probe_host_artifacts
 from .colony import ColonyExecutor
+from .oracle_verdict import parse_oracle_verdict
 from .conversation import ConversationExecutor, interaction_kind
 from .continuation import continuation_intent
 from .discovery import mcp_inventory, observed_assets
@@ -525,6 +526,24 @@ class RuntimeServer(_RuntimeServerBase):
         if not latest or str(latest[0]["mission_id"]) != mission_id:
             raise RuntimeError("continuation source is stale; resolve the latest mission")
         detail = self.service.store.inspect(mission_id)
+        if str(source.get("status") or "") == "completed" and any(row.get("role") == "ORACLE" for row in detail.get("tasks") or []):
+            accepted_id = source.get("oracle_result_artifact_id")
+            artifact = next((row for row in detail.get("artifacts") or [] if row.get("artifact_id") == accepted_id), None)
+            try:
+                if not artifact or artifact.get("status") != "accepted":
+                    raise ValueError("missing oracle artifact")
+                oracle_path = Path(artifact["path"]).resolve()
+                oracle_root = (self.workspace / ".crabagent" / "artifacts" / mission_id).resolve()
+                if oracle_root not in oracle_path.parents:
+                    raise ValueError("oracle artifact escaped the source mission")
+                raw = oracle_path.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != artifact.get("sha256"):
+                    raise ValueError("oracle artifact hash mismatch")
+                verdict = parse_oracle_verdict(raw.decode("utf-8"))
+                if not verdict["valid"] or verdict["verdict"] != "pass":
+                    raise ValueError("oracle verdict is not pass")
+            except (OSError, ValueError, TypeError) as exc:
+                raise RuntimeError("continuation source has no verified Oracle pass; stored completion alone is insufficient") from exc
         plan = detail.get("goal_plan") or {}
         scope = normalize_execution_scope(source.get("execution_scope") or plan.get("execution_scope"))
         context = None

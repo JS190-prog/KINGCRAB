@@ -46,11 +46,12 @@ from .ontology_contract import (
     update_decision_gate,
 )
 from .goal_graph import compact_goal_graph, compile_goal_graph
-from .goal import EXECUTION_SCOPE_LOCAL_ONLY, normalize_execution_scope, workspace_writes_forbidden
+from .goal import EXECUTION_SCOPE_LOCAL_ONLY, normalize_execution_scope, objective_artifact_paths, workspace_writes_forbidden
+from .oracle_verdict import CONTRACT as ORACLE_VERDICT_CONTRACT, parse_oracle_verdict
 from .kinetic_contract import compact_king_plan, compile_king_plan
 from .kinetic_workflow import compact_kinetic_workflow, workflow_summary
 from .runtime import RuntimeService
-from .workspace_observer import capture_workspace, diff_workspace
+from .workspace_observer import capture_workspace, diff_workspace, verify_workspace_change
 from .opencrab_snapshot import load_diff
 from .store import new_id
 
@@ -60,7 +61,7 @@ ROLE_INSTRUCTIONS = {
     Role.QUEEN: "Retrieve and shape only the minimum ontology path needed for this goal. Preserve evidence references and do not invent sources.",
     Role.WORKER: "Produce only the bounded deliverable. When requires_write is false, return the requested evidence-backed result without editing workspace or external state. When requires_write is true, use the compiled role handoff, preserve user changes, and run focused verification.",
     Role.SOLDIER: "Patrol evidence, scope, duplicate work, and waste. Stop or quarantine only what the receipts justify.",
-    Role.ORACLE: "Inspect actual artifacts, receipts, evidence and verification output. Publish a concise conclusion only when the gates pass.",
+    Role.ORACLE: "Inspect actual artifacts, receipts, evidence and verification output. " + ORACLE_VERDICT_CONTRACT,
 }
 
 ROLE_IDLE_TIMEOUT_SECONDS = {
@@ -1964,7 +1965,7 @@ class ColonyExecutor:
                         change_data = json.loads(Path(change_artifacts[-1]["path"]).read_text(encoding="utf-8"))
                     except (OSError, ValueError, TypeError):
                         change_data = {}
-                workspace_change_ok = not self.goal_plan.get("requires_write") or bool(change_data.get("changed_file_count"))
+                workspace_change_ok = self._verify_workspace_change(mission_id)["passed"]
                 worker_output_required = bool(self.goal_plan.get("requires_worker_output"))
                 worker_task_ids = {
                     str(row.get("task_id") or "")
@@ -2102,7 +2103,7 @@ class ColonyExecutor:
                         change_data = json.loads(Path(change_artifacts[-1]["path"]).read_text(encoding="utf-8"))
                     except (OSError, ValueError, TypeError):
                         change_data = {}
-                workspace_change_ok = not self.goal_plan.get("requires_write") or bool(change_data.get("changed_file_count"))
+                workspace_change_ok = self._verify_workspace_change(mission_id)["passed"]
                 verified = verified and workspace_change_ok and goal_graph_ok
                 data = {
                     "verdict": "accepted" if verified else "rejected",
@@ -2200,6 +2201,26 @@ class ColonyExecutor:
         )
         self._worker_baseline = None
         return artifact.artifact_id
+
+    def _verify_workspace_change(self, mission_id: str) -> Dict[str, Any]:
+        if not self.goal_plan.get("requires_write"):
+            return {"passed": True, "required": False}
+        snapshot = self.store.inspect(mission_id)
+        worker_ids = {row["task_id"] for row in snapshot["tasks"] if row["role"] == Role.WORKER.value}
+        artifacts = [row for row in snapshot["artifacts"] if row.get("kind") == "workspace_change" and row.get("task_id") in worker_ids]
+        if not artifacts:
+            return {"passed": False, "issues": ["missing_worker_change_receipt"]}
+        artifact = artifacts[-1]
+        try:
+            content = Path(artifact["path"]).read_bytes()
+            if hashlib.sha256(content).hexdigest() != artifact.get("sha256"):
+                raise ValueError("changed receipt bytes")
+            receipt = json.loads(content)
+            if receipt.get("mission_id") != mission_id or receipt.get("task_id") not in worker_ids:
+                raise ValueError("change receipt identity mismatch")
+        except (OSError, ValueError, TypeError):
+            return {"passed": False, "issues": ["invalid_worker_change_receipt"]}
+        return verify_workspace_change(self.service.workspace, receipt)
 
     def _load_opencrab_context(
         self,
@@ -2611,6 +2632,9 @@ class ColonyExecutor:
         )
         if not approved:
             raise RuntimeError("HOST_WORKER_ARTIFACT_NOT_APPROVED: mission lacks write_local_demo_artifacts approval")
+        requested_paths = objective_artifact_paths(str(snapshot["mission"].get("objective") or ""))
+        if requested_paths and str(spec["relative_path"]) not in requested_paths:
+            raise RuntimeError("HOST_WORKER_ARTIFACT_FORBIDDEN: target is not an artifact requested by the mission objective")
 
         runtime_root = self.service.workspace / ".crabagent"
         artifact_root = runtime_root / "artifacts"
@@ -2970,6 +2994,7 @@ class ColonyExecutor:
         observation_source = str(getattr(self.bridge, "observation_source", executor_name))
         supports_session_fallback = bool(getattr(self.bridge, "supports_session_fallback", True))
         attempt = self.store.start_attempt(mission_id, task["task_id"], executor_name)
+        attempt_finished = False
         self.store.set_assignment_invocation(task["task_id"], "invoking")
 
         def emit(event: CodexLiveEvent) -> None:
@@ -3148,11 +3173,18 @@ class ColonyExecutor:
                 },
             )
             self.store.finish_attempt(mission_id, attempt["attempt_id"], attempt["lease_id"], AttemptStatus.SUCCEEDED)
-            final_status = TaskStatus.VERIFIED if role is Role.ORACLE else TaskStatus.COMPLETED
-            self.store.set_task_status(task["task_id"], final_status, role)
+            attempt_finished = True
             self.store.set_assignment_invocation(task["task_id"], "invoked", model=actual_model, effort=effort, profile=actual_profile)
             self.store.add_message(self.session_id, "assistant", content, mission_id, {"role": role.value, "model": actual_model, "turn_id": turn.turn_id})
             if role is Role.ORACLE:
+                verdict = parse_oracle_verdict(content)
+                change_check = self._verify_workspace_change(mission_id)
+                self.store.append_event(mission_id, "oracle_acceptance_observed", role.value,
+                                        {"task_id": task["task_id"], "artifact_id": artifact.artifact_id,
+                                         "model_verdict": verdict, "workspace_verification": change_check})
+                if not verdict["valid"] or verdict["verdict"] != "pass" or not change_check["passed"]:
+                    self.store.set_artifact_status(artifact.artifact_id, ArtifactStatus.REJECTED, role)
+                    raise RuntimeError("ORACLE_ACCEPTANCE_REJECTED: " + json.dumps({"model_verdict": verdict, "workspace_verification": change_check}, ensure_ascii=False))
                 metadata_only_lookup = (
                     self.goal_plan.get("action_mode") == "lookup"
                     and bool(self.opencrab_receipt.get("observed_items"))
@@ -3199,9 +3231,12 @@ class ColonyExecutor:
                 for row in self.store.inspect(mission_id)["artifacts"]:
                     self.store.set_artifact_status(row["artifact_id"], ArtifactStatus.ACCEPTED, Role.ORACLE)
                 self.store.set_oracle_result(mission_id, artifact.artifact_id)
+            final_status = TaskStatus.VERIFIED if role is Role.ORACLE else TaskStatus.COMPLETED
+            self.store.set_task_status(task["task_id"], final_status, role)
             return turn
         except Exception as exc:
-            self.store.finish_attempt(mission_id, attempt["attempt_id"], attempt["lease_id"], AttemptStatus.FAILED, str(exc))
+            if not attempt_finished:
+                self.store.finish_attempt(mission_id, attempt["attempt_id"], attempt["lease_id"], AttemptStatus.FAILED, str(exc))
             self.store.set_task_status(task["task_id"], TaskStatus.FAILED, role)
             self.store.set_assignment_invocation(task["task_id"], "failed", model=actual_model, profile=actual_profile)
             raise

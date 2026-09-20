@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import hashlib
 import re
 from typing import Any, Dict, List, Optional
 
@@ -425,13 +426,14 @@ def workspace_writes_forbidden(objective: str) -> bool:
     mutation_list = mutation + r"(?:\s*(?:·|,|및|와|과|하거나|하고|하며)\s*" + mutation + r")*"
     prohibition = (
         resource_list + r"(?:을|를|의|에)?\s*(?P<actions>" + mutation_list + r")(?:은|는|을|를|도)?\s*"
-        r"(?:권한(?:이|은)?\s*(?:전혀\s*|일절\s*)?없|(?:전면\s*|모두\s*|일절\s*)?금지|하지\s*(?:마|말|않))"
+        r"(?:권한(?:이|은)?\s*(?:전혀\s*|일절\s*)?없|(?:전면\s*|모두\s*|일절\s*)?금지|(?:(?:승인|허용)\s*)?하지\s*(?:마|말|않))"
     )
     for clause in re.split(r"[.!?;\n]", text):
         # A deny for creating/writing any workspace file is a global boundary;
         # a deny for modifying/deleting existing files is a narrower boundary.
         for match in re.finditer(prohibition, clause):
-            if re.search(r"(?:기존|다른)\s*$", clause[:match.start()]):
+            subject_prefix = re.split(r"[,;]|하고|하며|지만|는데", clause[:match.start()])[-1].strip()
+            if re.match(r"^(?:기존|다른|나머지|외부)(?:\s|$)", subject_prefix):
                 continue
             if re.search(r"생성|쓰기|저장|작성", match.group("actions")):
                 return True
@@ -442,6 +444,14 @@ def workspace_writes_forbidden(objective: str) -> bool:
         if re.search(r"\b(?:no|without)\s+(?:permission|authority)\s+to\s+(?:create|write|modify|change|edit)\s+(?:(?:any|the)\s+)?(?:files?|filesystem|workspace)\b", clause):
             return True
     return False
+
+
+def objective_artifact_paths(objective: str) -> List[str]:
+    """Exact mission-local output locators explicitly present in the objective."""
+    return list(dict.fromkeys(re.findall(
+        r'''(?<![A-Za-z0-9_/.-])\.crabagent/artifacts/[A-Za-z0-9][A-Za-z0-9_.-]{0,123}\.(?:txt|md|json)(?=$|[\s`'"),;!?]|\.(?=\s|$))''',
+        str(objective or ""),
+    )))
 
 
 @dataclass(frozen=True)
@@ -481,6 +491,7 @@ class GoalPlan:
     rationale: List[str] = field(default_factory=list)
     execution_scope: str = ""
     retrieval_mode: str = "auto"
+    write_authority: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -873,6 +884,13 @@ def classify_goal(
         retrieval_contract=retrieval_contract,
         rationale=rationale,
         execution_scope=scope,
+        write_authority={
+            "schema": "kingcrab-workspace-write/v1",
+            "objective_sha256": hashlib.sha256(clean.encode("utf-8")).hexdigest(),
+            "requires_write": writes,
+            "forbidden": workspace_writes_forbidden(clean),
+            "artifact_paths": objective_artifact_paths(clean) if writes else [],
+        },
     )
 
 
