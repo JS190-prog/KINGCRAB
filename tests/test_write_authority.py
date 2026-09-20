@@ -28,6 +28,9 @@ NO_WRITE_OBJECTIVE = (
     "Create a file; read_only=true.",
     "취소 전용 무쓰기 수용시험. 파일·디렉터리·설정 생성·수정·삭제를 승인하지 않는다. 미션 내부 상태와 receipt 저장만 허용한다.",
     "파일 생성·수정을 허용하지 않는다. full_pipeline=true.",
+    "WORKER가 새 파일을 생성한다. 다른 작업은 계속하되 파일 생성은 금지한다.",
+    "WORKER가 새 파일을 생성한다. 다른 파일은 읽고 모든 파일 생성은 금지한다.",
+    "WORKER가 새 파일을 생성한다. 외부 서비스가 정상이어도 파일 생성을 승인하지 않는다.",
 ])
 def test_explicit_no_write_keeps_five_roles_without_granting_write(objective, tmp_path):
     assert workspace_writes_forbidden(objective)
@@ -45,6 +48,8 @@ def test_explicit_no_write_keeps_five_roles_without_granting_write(objective, tm
     "WORKER가 파일 한 개를 생성한다. 기존 파일 수정·삭제는 금지한다. OpenCrab 인제스트도 금지한다.",
     "WORKER가 파일 한 개를 생성하고 OpenCrab 수정·삭제는 금지한다.",
     "파일을 생성한다. 다른 파일의 쓰기는 금지한다.",
+    "WORKER는 .crabagent/artifacts/followup.txt 한 개만 exclusive_create로 새로 만든다. source 파일을 포함한 다른 사용자 파일·디렉터리·설정의 생성·수정·삭제는 금지한다.",
+    "WORKER는 .crabagent/artifacts/followup.txt 한 개만 exclusive_create로 새로 만든다. 앞서 만든 기존 사용자 파일·디렉터리·설정의 생성·수정·삭제는 금지한다.",
     "WORKER는 .crabagent/artifacts/source.txt 파일 하나만 exclusive_create로 새로 만든다. 다른 사용자 파일·디렉터리·설정의 생성·수정·삭제는 금지한다. 외부 쓰기·인제스트·재시작·재배포·자격 증명 변경은 금지한다.",
 ])
 def test_narrow_external_or_existing_file_prohibition_preserves_bounded_local_write(objective, tmp_path):

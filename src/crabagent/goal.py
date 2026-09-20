@@ -433,8 +433,14 @@ def workspace_writes_forbidden(objective: str) -> bool:
         # a deny for modifying/deleting existing files is a narrower boundary.
         for match in re.finditer(prohibition, clause):
             subject_prefix = re.split(r"[,;]|하고|하며|지만|는데", clause[:match.start()])[-1].strip()
-            if re.match(r"^(?:기존|다른|나머지|외부)(?:\s|$)", subject_prefix):
-                continue
+            qualifiers = list(re.finditer(r"(?:^|\s)(?:기존|다른|나머지|외부)(?=\s|$)", subject_prefix))
+            if qualifiers:
+                # Bind the nearest restriction to the resource noun phrase.
+                # A case/topic particle between them starts a separate clause,
+                # so e.g. "다른 작업은 ... 파일 생성 금지" remains a global deny.
+                modifiers = subject_prefix[qualifiers[-1].end():].split()
+                if not any(re.search(r"(?:은|는|이|가|을|를|도|에서|에게)$", word) for word in modifiers):
+                    continue
             if re.search(r"생성|쓰기|저장|작성", match.group("actions")):
                 return True
         if re.search(r"\b(?:no|without)\s+(?:file|filesystem|workspace)\s+(?:writes?|changes?|mutations?)\b", clause):
