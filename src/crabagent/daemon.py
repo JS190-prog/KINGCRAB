@@ -18,6 +18,7 @@ from . import __version__
 from .identity import COLONY_PROTOCOL_VERSION
 from .codex_app_server import CodexAppServerSession
 from .host_model import HostModelSession
+from .host_artifacts import probe_host_artifacts
 from .colony import ColonyExecutor
 from .conversation import ConversationExecutor, interaction_kind
 from .continuation import continuation_intent
@@ -48,6 +49,7 @@ RUNTIME_CAPABILITIES = (
     "mission.host_turn",
     "mission.execution_scope",
     "mission.context_handoff",
+    "artifact.probe",
 )
 MISSION_SUMMARY_FIELDS = (
     "mission_id",
@@ -1302,6 +1304,8 @@ class RuntimeServer(_RuntimeServerBase):
                 "capabilities": list(RUNTIME_CAPABILITIES),
                 "workspace": str(self.workspace),
             }
+        if action == "artifact.probe":
+            return probe_host_artifacts(self.workspace, payload.get("paths"))
         if action == "initialize":
             return self.service.initialize()
         if action == "assets":
