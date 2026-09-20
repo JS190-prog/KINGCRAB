@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .goal import GoalPlan, classify_goal, normalize_execution_scope
+from .goal import GoalPlan, classify_goal, normalize_execution_scope, workspace_writes_forbidden
 from .goal_graph import compile_goal_graph
 from .kinetic_workflow import compile_kinetic_workflow
 from .inverter import SolteluInverter
@@ -203,16 +203,17 @@ class RuntimeService:
                 observation_source="not_observed",
             )
         )
-        self.store.add_approval(
-            Approval(
-                approval_id=new_id("approval"),
-                mission_id=mission_id,
-                action="write_local_demo_artifacts",
-                decision="approved",
-                decided_by="BUILT_IN_POLICY",
-                reason="Writes are isolated to .crabagent/artifacts in the selected workspace.",
+        if (goal_plan is None or goal_plan.requires_write) and not workspace_writes_forbidden(objective):
+            self.store.add_approval(
+                Approval(
+                    approval_id=new_id("approval"),
+                    mission_id=mission_id,
+                    action="write_local_demo_artifacts",
+                    decision="approved",
+                    decided_by="BUILT_IN_POLICY",
+                    reason="Writes are isolated to .crabagent/artifacts in the selected workspace.",
+                )
             )
-        )
         self.store.transition_mission(mission_id, MissionStatus.PLANNED, Role.KING)
         self.store.add_checkpoint(
             Checkpoint(

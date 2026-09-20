@@ -46,7 +46,7 @@ from .ontology_contract import (
     update_decision_gate,
 )
 from .goal_graph import compact_goal_graph, compile_goal_graph
-from .goal import EXECUTION_SCOPE_LOCAL_ONLY, normalize_execution_scope
+from .goal import EXECUTION_SCOPE_LOCAL_ONLY, normalize_execution_scope, workspace_writes_forbidden
 from .kinetic_contract import compact_king_plan, compile_king_plan
 from .kinetic_workflow import compact_kinetic_workflow, workflow_summary
 from .runtime import RuntimeService
@@ -2599,6 +2599,11 @@ class ColonyExecutor:
         if spec is None:
             raise RuntimeError("HOST_WORKER_ARTIFACT_REQUIRED: write-required host WORKER must return one bounded artifact directive")
         snapshot = self.store.inspect(mission_id)
+        if workspace_writes_forbidden(str(snapshot["mission"].get("objective") or "")):
+            raise RuntimeError("HOST_WORKER_ARTIFACT_FORBIDDEN: mission objective forbids workspace writes")
+        persisted_task = next((row for row in snapshot["tasks"] if row["task_id"] == task["task_id"]), None)
+        if not persisted_task or persisted_task["role"] != Role.WORKER.value or persisted_task.get("write_scope") != "task_contract_only":
+            raise RuntimeError("HOST_WORKER_ARTIFACT_FORBIDDEN: persisted task has no write scope")
         approved = any(
             str(row.get("action") or "") == "write_local_demo_artifacts"
             and str(row.get("decision") or "").casefold() == "approved"

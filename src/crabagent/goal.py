@@ -410,6 +410,40 @@ def _contains_write_intent(text: str) -> bool:
     return _contains(scrubbed, WRITE_SIGNALS)
 
 
+def workspace_writes_forbidden(objective: str) -> bool:
+    """Explicit workspace authority overrides positive planning/write signals.
+
+    A restriction on existing files or external services alone does not forbid
+    creating an explicitly requested new local artifact.
+    """
+    text = str(objective or "").casefold()
+    if _explicit_boolean_contract(text, "requires_write") is False or _explicit_boolean_contract(text, "read_only") is True:
+        return True
+    resource = r"(?:파일|디렉터리|폴더|설정|워크스페이스|작업\s*공간)"
+    mutation = r"(?:생성|쓰기|저장|작성|변경|수정|삭제)"
+    resource_list = resource + r"(?:\s*(?:·|,|및|와|과)\s*" + resource + r")*"
+    mutation_list = mutation + r"(?:\s*(?:·|,|및|와|과|하거나|하고|하며)\s*" + mutation + r")*"
+    prohibition = (
+        resource_list + r"(?:을|를|의|에)?\s*(?P<actions>" + mutation_list + r")(?:은|는|을|를|도)?\s*"
+        r"(?:권한(?:이|은)?\s*(?:전혀\s*|일절\s*)?없|(?:전면\s*|모두\s*|일절\s*)?금지|하지\s*(?:마|말|않))"
+    )
+    for clause in re.split(r"[.!?;\n]", text):
+        # A deny for creating/writing any workspace file is a global boundary;
+        # a deny for modifying/deleting existing files is a narrower boundary.
+        for match in re.finditer(prohibition, clause):
+            if re.search(r"(?:기존|다른)\s*$", clause[:match.start()]):
+                continue
+            if re.search(r"생성|쓰기|저장|작성", match.group("actions")):
+                return True
+        if re.search(r"\b(?:no|without)\s+(?:file|filesystem|workspace)\s+(?:writes?|changes?|mutations?)\b", clause):
+            return True
+        if re.search(r"\b(?:do not|don't|must not|never)\s+(?:create|write|modify|change|edit|touch)\s+(?:(?:any|the)\s+)?(?:files?|filesystem|workspace)\b", clause):
+            return True
+        if re.search(r"\b(?:no|without)\s+(?:permission|authority)\s+to\s+(?:create|write|modify|change|edit)\s+(?:(?:any|the)\s+)?(?:files?|filesystem|workspace)\b", clause):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class GoalPlan:
     """A deterministic mission contract compiled before any model turn."""
@@ -526,6 +560,8 @@ def classify_goal(
     if explicit_write is not None:
         writes = explicit_write
     if explicit_read_only is True:
+        writes = False
+    if workspace_writes_forbidden(clean):
         writes = False
     requires_worker_output = _requires_worker_output(text)
     research = _contains(signal_text, RESEARCH_SIGNALS)
