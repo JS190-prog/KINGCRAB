@@ -221,7 +221,6 @@ GRAPH_SIGNALS = (
     "node",
     "edge",
     "relation",
-    "path",
     "topology",
     "connect",
     "graph-based",
@@ -230,9 +229,11 @@ GRAPH_SIGNALS = (
     "엣지",
     "관계",
     "연결",
-    "경로",
     "위상",
 )
+
+# A path can describe a filesystem target or the role execution sequence.
+# Require graph vocabulary (or an explicit graph contract), not that noun alone.
 
 DIRECT_LOOKUP_SIGNALS = (
     "list",
@@ -454,8 +455,14 @@ def workspace_writes_forbidden(objective: str) -> bool:
 
 def objective_artifact_paths(objective: str) -> List[str]:
     """Exact mission-local output locators explicitly present in the objective."""
+    # Korean case particles belong to the sentence, not the ASCII locator.
+    # Require a full sentence/token boundary after the particle so a longer
+    # filename, nested path or suffix cannot authorize its shorter prefix.
+    particle = r"(?:에서|에게|으로|을|를|은|는|이|가|도|만|에|로|와|과)?"
+    boundary = r'''(?:$|[\s`'"),;!?]|\.(?=\s|$))'''
     return list(dict.fromkeys(re.findall(
-        r'''(?<![A-Za-z0-9_/.-])\.crabagent/artifacts/[A-Za-z0-9][A-Za-z0-9_.-]{0,123}\.(?:txt|md|json)(?=$|[\s`'"),;!?]|\.(?=\s|$))''',
+        r'''(?<![A-Za-z0-9_/.-])\.crabagent/artifacts/[A-Za-z0-9][A-Za-z0-9_.-]{0,123}\.(?:txt|md|json)'''
+        + rf"(?={particle}{boundary})",
         str(objective or ""),
     )))
 
