@@ -23,6 +23,34 @@ def test_korean_declarative_negated_write_stays_read_only():
     assert plan.requires_write is False
 
 
+def test_authorized_workspace_creation_contract_is_a_worker_write():
+    objective = (
+        "RUN_ID=20260921T071715Z-57504d90. Execute a new isolated acceptance mission through the complete "
+        "KING -> QUEEN -> SOLDIER -> WORKER -> ORACLE host-model pipeline. The sole authorized workspace "
+        "mutation is exclusive creation of .crabagent/artifacts/20260921T071715Z-57504d90-source.txt with "
+        "exact UTF-8 bytes for the text KINGCRAB_E2E:20260921T071715Z-57504d90:source followed by exactly one "
+        "LF newline, no BOM, total 46 bytes, expected SHA-256 "
+        "6de86b4a857439b3faab8223dfbcc69dc214a7afe7aad480c242827fb3860a4c. Preflight freshly confirmed the path "
+        "absent. Preserve every existing file, database, setting, external service and Office artifact. Only "
+        "WORKER may emit an actual artifact creation directive; KING, QUEEN and SOLDIER provide bounded "
+        "planning/checks without artifact directives; ORACLE verifies observed receipts and original-byte "
+        "readback without emitting artifact directives. All five roles must use host turns, not deterministic "
+        "replacements. Do not retry mutations or expand scope."
+    )
+
+    plan = classify_goal(objective, forced="full", retrieval_mode="none")
+
+    assert plan.requires_write is True
+    assert plan.requires_worker_output is False
+    assert plan.action_mode == "execute"
+    assert plan.write_authority["requires_write"] is True
+    assert plan.write_authority["forbidden"] is False
+    assert plan.write_authority["artifact_paths"] == [
+        ".crabagent/artifacts/20260921T071715Z-57504d90-source.txt"
+    ]
+    assert plan.stages == ["KING", "QUEEN", "SOLDIER", "WORKER", "ORACLE"]
+
+
 @pytest.fixture
 def server(tmp_path):
     paths = runtime_paths(tmp_path)

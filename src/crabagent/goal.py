@@ -160,6 +160,16 @@ READ_ONLY_CHANGE_CONTEXTS = (
     r"(?:수정|변경|업데이트)(?:본|안|사항|내용|범위|대상|결과|이력|내역)",
 )
 
+# Persisted deliverables are sometimes expressed as contract nouns instead of
+# imperative verbs (for example, "exclusive creation of .crabagent/.../x.txt").
+# Keep this separate from the broad WRITE_SIGNALS list: an unqualified word
+# such as "creation" can describe history or metadata, while a creation of a
+# concrete filesystem path is an executable workspace change.
+PERSISTED_WRITE_CONTEXTS = (
+    r"\b(?:creation|writing|saving|modification|editing|deletion)\s+of\s+`?\.?[A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)+`?",
+    r"\b(?:workspace|filesystem)\s+(?:mutation|write|change)\b[^.!?;\n]{0,160}\b(?:create|creation|write|writing|save|saving|modify|modification|edit|editing|delete|deletion)\b",
+)
+
 RESEARCH_SIGNALS = (
     "research",
     "search",
@@ -408,6 +418,8 @@ def _contains_write_intent(text: str) -> bool:
     # A declarative request to create a file is a persisted deliverable.
     # Merely creating a mission or composing a table in the response is not.
     if re.search(r"파일(?:을|를)?[^\n!?;]{0,240}(?:작성|생성)한다", scrubbed):
+        return True
+    if any(re.search(pattern, scrubbed, flags=re.IGNORECASE) for pattern in PERSISTED_WRITE_CONTEXTS):
         return True
     return _contains(scrubbed, WRITE_SIGNALS)
 
