@@ -19,6 +19,7 @@ from .identity import COLONY_PROTOCOL_VERSION
 from .codex_app_server import CodexAppServerSession
 from .host_model import HostModelSession
 from .host_artifacts import probe_host_artifacts
+from .artifact_integrity import verify_mission_artifacts
 from .colony import ColonyExecutor
 from .oracle_verdict import parse_oracle_verdict
 from .conversation import ConversationExecutor, interaction_kind
@@ -39,6 +40,7 @@ from .onboarding import (
 from .orchestration import OrchestrationStore, normalize_children, orchestration_id, summarize, utc_now
 from .protocol import USE_UNIX_SOCKET, runtime_paths, runtime_revision
 from .runtime import RuntimeService
+from .release_provenance import current_release_provenance
 from .workspace_defaults import default_workspace, is_legacy_tb_scratch_root
 
 
@@ -52,6 +54,7 @@ RUNTIME_CAPABILITIES = (
     "mission.execution_scope",
     "mission.context_handoff",
     "artifact.probe",
+    "mission.artifact_integrity",
 )
 MISSION_SUMMARY_FIELDS = (
     "mission_id",
@@ -1323,9 +1326,13 @@ class RuntimeServer(_RuntimeServerBase):
                 "runtime_api": RUNTIME_API_VERSION,
                 "capabilities": list(RUNTIME_CAPABILITIES),
                 "workspace": str(self.workspace),
+                "release_provenance": current_release_provenance(),
             }
         if action == "artifact.probe":
             return probe_host_artifacts(self.workspace, payload.get("paths"))
+        if action == "mission.artifact_integrity":
+            mission_id = str(payload.get("mission_id") or "").strip()
+            return verify_mission_artifacts(self.service.store, mission_id)
         if action == "initialize":
             return self.service.initialize()
         if action == "assets":

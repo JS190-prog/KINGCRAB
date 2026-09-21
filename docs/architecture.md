@@ -39,6 +39,13 @@ Every displayed state must come from a persisted observation:
 - A task is complete only after its output contract is satisfied.
 - A mission is complete only after ORACLE records a verification decision.
 - Planned model routes are never reported as executed routes.
+- `mission.artifact_integrity` is a bounded read-only daemon action that reopens
+  each mission artifact, hashes its current original bytes and compares that
+  digest with the durable artifact row. Metadata counts alone are not byte
+  verification.
+- `ping.release_provenance` exposes only the validated bounded fields written
+  by the canonical release deployer so a remote checker can bind runtime state
+  to its installed source and wheel.
 
 ## Colony identity
 
