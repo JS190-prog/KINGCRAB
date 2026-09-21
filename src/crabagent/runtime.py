@@ -417,11 +417,20 @@ class RuntimeService:
         directory = self.store.artifacts_dir / mission_id
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / filename
+        artifact_id = new_id("artifact")
         encoded = content.encode("utf-8")
-        path.write_bytes(encoded)
+        # A refresh records a new artifact; previous receipts must keep the
+        # bytes identified by their stored digest, including across retries.
+        try:
+            stream = path.open("xb")
+        except FileExistsError:
+            path = path.with_name(f"{path.stem}.{artifact_id}{path.suffix}")
+            stream = path.open("xb")
+        with stream:
+            stream.write(encoded)
         digest = hashlib.sha256(encoded).hexdigest()
         artifact = Artifact(
-            artifact_id=new_id("artifact"),
+            artifact_id=artifact_id,
             mission_id=mission_id,
             task_id=task_id,
             kind=kind,
