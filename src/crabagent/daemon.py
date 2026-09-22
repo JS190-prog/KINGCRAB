@@ -199,7 +199,17 @@ def _crab_doc_list(workspace: Path) -> Dict[str, Any]:
     return {"status": "ok", "count": len(documents), "documents": documents, "root": str(root)}
 
 
-_RuntimeServerBase = socketserver.UnixStreamServer if USE_UNIX_SOCKET else socketserver.ThreadingTCPServer
+if USE_UNIX_SOCKET:
+    class _ThreadingUnixStreamServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        """Serve independent local runtime requests without head-of-line blocking."""
+
+        daemon_threads = True
+        block_on_close = False
+
+
+    _RuntimeServerBase = _ThreadingUnixStreamServer
+else:
+    _RuntimeServerBase = socketserver.ThreadingTCPServer
 
 
 class RuntimeServer(_RuntimeServerBase):

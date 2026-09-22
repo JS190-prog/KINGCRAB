@@ -109,6 +109,55 @@ def test_daemon_protocol_runs_demo_and_replays_receipts(tmp_path: Path) -> None:
             paths["socket"].unlink()
 
 
+def test_runtime_serves_ping_while_another_request_is_blocked(tmp_path: Path, monkeypatch) -> None:
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    if paths["socket"].exists():
+        paths["socket"].unlink()
+    server = RuntimeServer(tmp_path, paths["socket"])
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    slow_result = {}
+    original_dispatch = server.dispatch
+
+    def dispatch(request):
+        if request.get("action") == "test.blocking":
+            slow_started.set()
+            if not release_slow.wait(timeout=2.0):
+                raise TimeoutError("test did not release blocking request")
+            return {"status": "released"}
+        return original_dispatch(request)
+
+    monkeypatch.setattr(server, "dispatch", dispatch)
+    server_thread.start()
+
+    def run_slow_request() -> None:
+        slow_result.update(DaemonClient(tmp_path, timeout=3.0).request("test.blocking"))
+
+    slow_thread = threading.Thread(target=run_slow_request, daemon=True)
+    try:
+        slow_thread.start()
+        assert slow_started.wait(timeout=1.0)
+        started = time.monotonic()
+        ping = DaemonClient(tmp_path, timeout=0.75).request("ping")
+        elapsed = time.monotonic() - started
+
+        assert ping["status"] == "online"
+        assert elapsed < 1.0
+        release_slow.set()
+        slow_thread.join(timeout=1.0)
+        assert slow_result == {"status": "released"}
+    finally:
+        release_slow.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2.0)
+        slow_thread.join(timeout=1.0)
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
 def test_mission_summary_exposes_execution_scope_for_runtime_readback() -> None:
     summary = _mission_summary({"mission_id": "mission-scope", "execution_scope": "local_only"})
 
