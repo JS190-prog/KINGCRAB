@@ -2274,9 +2274,18 @@ class ColonyExecutor:
                     for value in (scope_resolution.get("selected_package_ids") or [])
                     if str(value).strip()
                 ]
+            # An injected loader serves one frozen, already-observed context.
+            # The cache key does not cover that content, so a cache hit could
+            # replace the handoff with an older receipt (or store the handoff
+            # for a later direct query).
+            cache_path = (
+                None
+                if self.opencrab_context_loader is not None
+                else self.service.workspace / ".crabagent" / "opencrab" / "ontology-context-cache.json"
+            )
             return OntologyContextCollector(
                 call_tool,
-                cache_path=self.service.workspace / ".crabagent" / "opencrab" / "ontology-context-cache.json",
+                cache_path=cache_path,
             ).collect(
                 objective,
                 package_ids=package_ids,

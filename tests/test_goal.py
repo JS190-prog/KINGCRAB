@@ -1468,3 +1468,25 @@ def test_token_gate_stops_before_oracle_model_call(tmp_path: Path) -> None:
     assert bridge.calls == 1
     assert snapshot["budget"]["tokens_observed"] == 20000
     assert any(row.event_type == "token_budget_gate" for row in service.store.events(snapshot["mission"]["mission_id"]))
+
+
+def test_injected_opencrab_context_never_reads_or_writes_the_receipt_cache(tmp_path: Path) -> None:
+    service = RuntimeService(tmp_path)
+    session = service.store.create_session(interaction_mode="colony")
+
+    class Bridge:
+        thread_id = "thread-handoff-cache"
+        last_start_mode = "not_started"
+
+        def start(self) -> str:
+            raise AssertionError("exact lookup should not start Codex")
+
+    ColonyExecutor(
+        service,
+        session["session_id"],
+        Bridge(),
+        threading.Event(),
+        opencrab_context_loader=lambda args: {**_mcp_context(), "authority": "gateway_verified_mcp_response"},
+    ).run("내 오픈크랩 팩 목록을 보여줘", max_workers=1, worker_policy="fixed")
+
+    assert not (tmp_path / ".crabagent" / "opencrab" / "ontology-context-cache.json").exists()

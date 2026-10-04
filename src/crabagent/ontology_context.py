@@ -23,7 +23,9 @@ _CACHE_MAX_ENTRIES = 64
 _MCP_PACK_BATCH_LIMIT = 25
 _MAX_EXPLICIT_PACKAGES = 500
 _MAX_PERSISTED_EVIDENCE_ROWS = 32
-_CACHE_REVISION = "snapshot-provenance-v4"
+_CACHE_REVISION = "gateway-handoff-calls-v5"
+_GATEWAY_AUTHORITY = "gateway_verified_mcp_response"
+_MAX_HANDOFF_TOOL_CALLS = 32
 
 
 def _list_value(payload: Any, *keys: str) -> List[Dict[str, Any]]:
@@ -79,6 +81,41 @@ def _bounded_string_list(value: Any, limit: int, item_limit: int = 512) -> List[
         if len(result) >= max(0, int(limit)):
             break
     return result
+
+
+def _handoff_tool_calls(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Adopt the calls a gateway reports it made; never invent calls for it."""
+    raw_calls = payload.get("tool_calls")
+    if not isinstance(raw_calls, list):
+        return []
+    calls: List[Dict[str, Any]] = []
+    for raw in raw_calls[:_MAX_HANDOFF_TOOL_CALLS]:
+        if not isinstance(raw, dict):
+            continue
+        tool = _text(raw.get("tool"), 80)
+        if not tool:
+            continue
+        arguments = {
+            _text(key, 40): (_text(value, 200) if isinstance(value, str) else value)
+            for key, value in (raw.get("arguments") if isinstance(raw.get("arguments"), dict) else {}).items()
+            if isinstance(value, (str, int, float, bool)) and _text(key, 40)
+        }
+        response_status = _text(raw.get("response_status"), 40).lower() or "ok"
+        call: Dict[str, Any] = {
+            "tool": tool,
+            "arguments": arguments,
+            "status": "observed" if response_status in {"ok", "no_evidence", "cached"} else "failed",
+            "response_status": response_status,
+            "source": _GATEWAY_AUTHORITY,
+        }
+        evidence_count = raw.get("evidence_count")
+        if isinstance(evidence_count, int) and not isinstance(evidence_count, bool):
+            call["evidence_count"] = max(0, evidence_count)
+        lane_id = _text(raw.get("lane_id"), 120)
+        if lane_id:
+            call["lane_id"] = lane_id
+        calls.append(call)
+    return calls
 
 
 def _bounded_gateway_receipt_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -803,6 +840,7 @@ class OntologyContextCollector:
 
         calls: List[Dict[str, Any]] = []
         query_payloads: List[Dict[str, Any]] = []
+        gateway_handoff = False
         for batch_index, batch in enumerate(query_batches, start=1):
             batch_arguments = dict(query_arguments)
             if batch:
@@ -811,6 +849,32 @@ class OntologyContextCollector:
             if calls:
                 calls[-1]["selection_batch"] = batch_index
                 calls[-1]["selection_batch_count"] = len(query_batches)
+            if str(query_payloads[-1].get("authority") or "") == _GATEWAY_AUTHORITY:
+                # A gateway handoff is one frozen, already-observed context.
+                # Replaying it per batch would record queries nobody ran.
+                gateway_handoff = True
+                break
+        if gateway_handoff:
+            handoff_payload = query_payloads[-1]
+            reported_calls = _handoff_tool_calls(handoff_payload)
+            calls.clear()
+            calls.extend(reported_calls or [{
+                "tool": "opencrab_query",
+                "arguments": {},
+                "status": "observed",
+                "response_status": self._status(handoff_payload),
+                "source": "gateway_handoff_unrecorded",
+            }])
+            handoff_scope = handoff_payload.get("pack_scope")
+            covered = {
+                str(value)
+                for value in (handoff_scope.get("package_ids") if isinstance(handoff_scope, dict) else None) or []
+                if str(value).strip()
+            }
+            if covered:
+                queried_package_ids = [value for value in selected_all if value in covered]
+                omitted_package_ids = [value for value in selected_all if value not in covered]
+            query_batches = [queried_package_ids]
         query_payload = _merge_query_payloads(query_payloads)
         query_status = self._status(query_payload)
         observed_items = _dedupe_observed_items(
@@ -1070,7 +1134,8 @@ class OntologyContextCollector:
             "source": "OpenCrab MCP",
             "authority": str(query_payload.get("authority") or "direct_mcp_response"),
             "query": objective,
-            "arguments": query_arguments,
+            # A gateway handoff was not produced by these planned arguments.
+            "arguments": {} if gateway_handoff else query_arguments,
             "status": query_status,
             "error": query_payload.get("error"),
             "error_code": query_payload.get("error_code"),

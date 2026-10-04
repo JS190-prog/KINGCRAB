@@ -863,3 +863,86 @@ def test_gateway_preloaded_graph_avoids_runtime_graph_endpoint() -> None:
     assert receipt["paths"][0]["relation"] == "mentions"
     assert receipt["paths"][0]["evidence_refs"] == ["ev-1"]
     assert [row["tool"] for row in receipt["tool_calls"][1:]] == ["opencrab_search_nodes", "opencrab_get_node_context"]
+
+
+def _gateway_handoff(**extra: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "status": "ok",
+        "authority": "gateway_verified_mcp_response",
+        "evidence": [{"id": "ev-1", "text": "Grounded evidence", "source": "Evidence Document"}],
+        "pack_scope": {"packages": 2, "package_ids": ["pack-1", "pack-2"]},
+        "tool_calls": [
+            {"tool": "opencrab_status", "arguments": {}, "response_status": "ok"},
+            {
+                "tool": "opencrab_project_run",
+                "arguments": {"top_k": 6, "project_id": "project-1", "nested": {"drop": True}},
+                "response_status": "ok",
+                "evidence_count": 1,
+            },
+        ],
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_gateway_handoff_receipt_reports_gateway_calls_not_planned_query() -> None:
+    seen: List[Dict[str, Any]] = []
+
+    def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        seen.append(arguments)
+        return _gateway_handoff()
+
+    receipt = OntologyContextCollector(call_tool).collect(
+        "show the evidence",
+        package_ids=["pack-1", "pack-2"],
+        retrieval_contract={"primary_query": "show the evidence", "evidence_top_k": 8},
+    )
+
+    assert receipt["authority"] == "gateway_verified_mcp_response"
+    assert receipt["arguments"] == {}
+    assert [call["tool"] for call in receipt["tool_calls"]] == ["opencrab_status", "opencrab_project_run"]
+    run = receipt["tool_calls"][1]
+    assert run["arguments"] == {"top_k": 6, "project_id": "project-1"}
+    assert run["evidence_count"] == 1
+    assert all(call["source"] == "gateway_verified_mcp_response" for call in receipt["tool_calls"])
+    assert receipt["observed_tool_call_count"] == 2
+    assert receipt["pack_scope"]["scope_mode"] == "selected_complete"
+
+
+def test_gateway_handoff_is_not_replayed_per_selection_batch() -> None:
+    seen: List[Dict[str, Any]] = []
+    selection = ["pack-%d" % index for index in range(60)]
+
+    def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        seen.append(arguments)
+        return _gateway_handoff(pack_scope={"packages": 60, "package_ids": selection})
+
+    receipt = OntologyContextCollector(call_tool).collect("show the evidence", package_ids=selection)
+
+    assert len(seen) == 1
+    assert receipt["pack_scope"]["batch_count"] == 1
+    assert receipt["pack_scope"]["queried_package_count"] == 60
+    assert receipt["pack_scope"]["scope_mode"] == "selected_complete"
+
+
+def test_gateway_handoff_that_covers_fewer_packs_is_not_reported_complete() -> None:
+    def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return _gateway_handoff(pack_scope={"packages": 1, "package_ids": ["pack-1"]})
+
+    receipt = OntologyContextCollector(call_tool).collect(
+        "show the evidence", package_ids=["pack-1", "pack-2", "pack-3"],
+    )
+
+    assert receipt["pack_scope"]["queried_package_count"] == 1
+    assert receipt["pack_scope"]["omitted_package_count"] == 2
+    assert receipt["pack_scope"]["scope_mode"] == "selected_partial"
+
+
+def test_older_gateway_handoff_without_calls_is_marked_unrecorded() -> None:
+    def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return _gateway_handoff(tool_calls=[])
+
+    receipt = OntologyContextCollector(call_tool).collect("show the evidence", package_ids=["pack-1"])
+
+    assert [call["source"] for call in receipt["tool_calls"]] == ["gateway_handoff_unrecorded"]
+    assert receipt["tool_calls"][0]["arguments"] == {}
