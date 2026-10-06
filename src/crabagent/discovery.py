@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -75,6 +76,28 @@ def codex_login_status(executable: Optional[str] = None) -> str:
     return "not_connected"
 
 
+def claude_login_status(executable: Optional[str] = None) -> str:
+    """Observe Claude Code login through `claude auth status`; only the loggedIn flag is read."""
+    executable = executable or shutil.which("claude")
+    if not executable:
+        return "unavailable"
+    try:
+        result = subprocess.run(
+            [executable, "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    try:
+        logged_in = bool(json.loads(result.stdout or "{}").get("loggedIn"))
+    except ValueError:
+        return "unknown"
+    return "connected" if logged_in else "not_connected"
+
+
 def _skill_names(workspace: Path) -> List[str]:
     roots = [workspace / ".codex" / "skills", workspace / "skills", Path.home() / ".codex" / "skills", Path.home() / ".agents" / "skills"]
     names = []
@@ -105,12 +128,19 @@ def observed_assets(workspace: Path) -> Dict[str, Any]:
         found = shutil.which(name)
         if found:
             clis[name] = found
+    claude = shutil.which("claude")
     return {
         "codex": {
             "status": "available" if codex else "unavailable",
             "login_status": codex_login_status(codex),
             "provider": "codex",
             "executable": codex or "",
+        },
+        "claude": {
+            "status": "available" if claude else "unavailable",
+            "login_status": claude_login_status(claude),
+            "provider": "claude",
+            "executable": claude or "",
         },
         "mcp_servers": [item["name"] for item in mcp_rows],
         "mcp_inventory": mcp_rows,

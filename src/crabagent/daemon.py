@@ -10,12 +10,13 @@ import threading
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import typer
 
 from . import __version__
 from .identity import COLONY_PROTOCOL_VERSION
+from .claude_code import ClaudeCodeSession, is_claude_thread
 from .codex_app_server import CodexAppServerSession
 from .host_model import HostModelSession
 from .host_artifacts import probe_host_artifacts
@@ -25,6 +26,7 @@ from .oracle_verdict import parse_oracle_verdict
 from .conversation import ConversationExecutor, interaction_kind
 from .continuation import continuation_intent
 from .discovery import mcp_inventory, observed_assets
+from .runner_pipeline import parse_judgments
 from .folder_ingest import OpenCrabPackBuilder, remote_package_id, remote_status, upload_session_id_from_result
 from .goal import EXECUTION_SCOPE_LOCAL_ONLY, classify_goal, normalize_execution_scope
 from .opencrab import OpenCrabInspector, OpenCrabMcpClient, OpenCrabUnavailable, filter_inventory_for_display, opencrab_is_configured, opencrab_url
@@ -81,6 +83,31 @@ def _mission_summary(value: Dict[str, Any]) -> Dict[str, Any]:
 def _pending_request_summary(value: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value.get(key) for key in PENDING_REQUEST_FIELDS if value.get(key) is not None}
 
+
+# The runner caps one judgment request; larger requests are cut rather than sent whole.
+JUDGMENT_REQUEST_MAX_CHARS = 120_000
+
+
+def provider_file() -> Path:
+    return Path.home() / ".crabagent" / "provider"
+
+
+def saved_provider() -> str:
+    try:
+        return provider_file().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def select_provider(requested: str = "") -> tuple:
+    """Pick the model provider: the session's choice, then CRAB_PROVIDER, then Codex, then Claude Code."""
+    order = [name for name in (requested, os.environ.get("CRAB_PROVIDER", ""), saved_provider()) if name in {"codex", "claude"}]
+    order += [name for name in ("codex", "claude") if name not in order]
+    for name in order:
+        executable = shutil.which(name)
+        if executable:
+            return name, executable
+    raise RuntimeError("No model provider found; install Codex (`codex`) or Claude Code (`claude`) and log in")
 
 class RuntimeRequestHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
@@ -382,7 +409,7 @@ class RuntimeServer(_RuntimeServerBase):
             project_root = self.workspace
         with self._state_lock:
             bridge = self._bridges.get(session_id)
-            expected_type = HostModelSession if executor_policy == "host" else CodexAppServerSession
+            expected_type = HostModelSession if executor_policy == "host" else (CodexAppServerSession, ClaudeCodeSession)
             if bridge is not None and not isinstance(bridge, expected_type):
                 bridge.close()
                 self._bridges.pop(session_id, None)
@@ -395,18 +422,43 @@ class RuntimeServer(_RuntimeServerBase):
                         project_root=str(project_root.resolve()),
                     )
                 else:
-                    executable = shutil.which("codex")
-                    if not executable:
-                        raise RuntimeError("Codex CLI is unavailable; install or expose `codex` on PATH")
-                    bridge = CodexAppServerSession(
-                        executable,
-                        project_root,
-                        thread_id=str(session.get("codex_thread_id") or ""),
-                        mcp_policy=str(session.get("mcp_policy") or "auto"),
-                        mcp_servers=[str(row["name"]) for row in mcp_inventory()],
-                    )
+                    provider, executable = select_provider(str(session.get("provider") or ""))
+                    saved_thread = str(session.get("codex_thread_id") or "")
+                    if provider == "claude":
+                        bridge = ClaudeCodeSession(
+                            executable,
+                            project_root,
+                            thread_id=saved_thread if is_claude_thread(saved_thread) else "",
+                            mcp_policy=str(session.get("mcp_policy") or "auto"),
+                        )
+                    else:
+                        bridge = CodexAppServerSession(
+                            executable,
+                            project_root,
+                            thread_id="" if is_claude_thread(saved_thread) else saved_thread,
+                            mcp_policy=str(session.get("mcp_policy") or "auto"),
+                            mcp_servers=[str(row["name"]) for row in mcp_inventory()],
+                        )
                 self._bridges[session_id] = bridge
             return bridge
+
+    def _judgment_pass(self, session: Dict[str, Any]) -> Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """One model turn that answers the runner's judgment request with quoted decisions, actions and risks."""
+
+        def judge(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            body = json.dumps(request, ensure_ascii=False)
+            if len(body) > JUDGMENT_REQUEST_MAX_CHARS:
+                body = body[:JUDGMENT_REQUEST_MAX_CHARS]
+            prompt = (
+                "You are the WORKER for an OpenCrab pack build. Read the judgment request below. "
+                "For each chunk, list only the decisions, action items and risks the chunk itself states, "
+                "each with a verbatim quote copied from that chunk. Follow judgment_schema exactly. "
+                'Reply with one JSON object {"version": 1, "judgments": [...]} and nothing else.\n\n' + body
+            )
+            turn = self._bridge(session).run_turn(prompt, lambda _event: None)
+            return parse_judgments(turn.text)
+
+        return judge
 
     def _finish_job(self, session_id: str) -> None:
         cancel = self._cancels.get(session_id)
@@ -1661,13 +1713,26 @@ class RuntimeServer(_RuntimeServerBase):
             if project is None and payload.get("project_name"):
                 project = self.service.store.ensure_project(str(payload.get("project_name")), root_path=folder)
                 project_id = str(project.get("project_id") or "")
-            result = self.pack_builder.build_and_ingest(
-                Path(folder),
-                project_id=project_id,
-                project_name=str((project or {}).get("name") or payload.get("project_name") or ""),
-                ontology_purpose=str(payload.get("ontology_purpose") or ""),
-                run_id=requested_run_id or None,
-            )
+            if str(payload.get("builder") or "") == "runner":
+                result = self.pack_builder.build_with_runner(
+                    Path(folder),
+                    project_id=project_id,
+                    project_name=str((project or {}).get("name") or payload.get("project_name") or ""),
+                    ontology_purpose=str(payload.get("ontology_purpose") or ""),
+                    run_id=requested_run_id or None,
+                    semantic_layer=str(payload.get("semantic_layer") or "full"),
+                    origin=str(payload.get("origin") or ""),
+                    judgments_path=Path(str(payload["judgments_path"])) if payload.get("judgments_path") else None,
+                    judge=self._judgment_pass(self._session(str(payload.get("session_id") or ""))) if payload.get("judge") else None,
+                )
+            else:
+                result = self.pack_builder.build_and_ingest(
+                    Path(folder),
+                    project_id=project_id,
+                    project_name=str((project or {}).get("name") or payload.get("project_name") or ""),
+                    ontology_purpose=str(payload.get("ontology_purpose") or ""),
+                    run_id=requested_run_id or None,
+                )
             self.service.store.record_pack_ingest_run(
                 str(result["run_id"]), project_id, str(result["root_path"]), str(result["status"]), result
             )

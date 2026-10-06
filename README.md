@@ -351,8 +351,34 @@ crab --version
 crab
 ```
 
+Or install it as a standalone command with pipx (no app bundle, so no macOS
+signing prompt):
+
+```bash
+pipx install git+https://github.com/AlexAI-MCP/KINGCRAB
+crab doctor            # Python, OpenCrab runner, Kordoc 4.x, OCR, Codex, Claude Code
+crab doctor --install  # runner Python packages + `npm install -g kordoc@latest`
+```
+
 Contributors should install the test extra inside a project virtual environment
 instead of changing unrelated user-level Python packages.
+
+### Model provider: Codex or Claude Code
+
+KINGCRAB runs its turns through whichever provider is installed and logged in:
+the Codex App Server (`codex`) or Claude Code (`claude -p`, resumed per
+session). Codex is tried first unless you choose otherwise:
+
+```bash
+crab provider claude   # or: crab provider codex; CRAB_PROVIDER overrides per run
+crab stop              # sessions opened after the runtime restarts use it
+```
+
+A saved Claude session id is stored as `claude:<id>` and is never resumed by
+Codex, and the reverse. Claude Code runs in print mode with
+`--permission-mode acceptEdits` by default (`CRAB_CLAUDE_PERMISSION_MODE`
+changes it); `mcp_policy=off` passes an empty strict MCP config. SOLTELU `gpt-*`
+model names are not sent to Claude; Claude Code then uses its own default model.
 
 ### Windows via WSL2
 
@@ -483,6 +509,39 @@ session is returned, while `crab pack status` remains the durable recovery
 path. Set
 `OPENCRAB_CRAB_AGENT_TOOL` only when the connected OpenCrab MCP exposes a
 different explicit CrabAgent tool name.
+
+### Build the pack on this machine: `crab pack build`
+
+`crab pack ingest` stages text sources and asks OpenCrab for a plan. `crab pack
+build` does the whole job locally and replaces the OpenCrab Desktop app:
+
+```bash
+crab pack build ./reports --project-name "경진대회 분석" \
+  --semantic-layer lean --origin source --judge
+crab pack status PACKRUN_ID
+```
+
+1. Installs the runner release OpenCrab names (`update_runner`): HTTPS download,
+   SHA-256 check, atomic replace in `~/.opencrab/bin`. A mismatched download
+   keeps the existing runner.
+2. Runs the runner over the folder. It parses PDF, HWP/HWPX, DOCX, XLSX and PPTX
+   through Kordoc 4.x, OCRs scanned pages, and writes the cloud-pack ZIP.
+3. With `--judge`, the WORKER model answers the runner's
+   `reports/judgment_request.json` (decisions, action items and risks, each with
+   a verbatim quote) and the pack is rebuilt with `--judgments`. The runner drops
+   any judgment whose quote is not in its chunk. `--judgments FILE` supplies a
+   prepared file instead.
+4. Verifies the ZIP (`--verify-upload-zip`), opens a one-time upload session
+   (`create_upload_session`, with `--origin` when given), uploads the ZIP to the
+   signed URL and finalizes it with the session token.
+5. Reports `upload_pending` and keeps the background watch; only a returned
+   `package_id` makes the run `ingested`.
+
+`--semantic-layer lean` keeps topics, documents and evidence and skips the
+per-sentence claim, concept, person and time nodes; use it when the structure
+comes from your own graph or from judgments. `--origin source|ai_generated`
+labels every document that does not set its own origin, so OpenCrab retrieval
+can prefer sources and warn when an answer rests on AI-written text.
 
 In the TUI, create a project with the `+` button and enter its folder. Each
 project row has its own `+` for a new durable conversation in that folder.
@@ -615,8 +674,9 @@ The default `Auto` interaction mode separates conversation from execution:
 
 ## Current boundary
 
-- The current release intentionally supports Codex only. SOLTELU is the
-  model/effort router.
+- Providers are Codex (App Server) and Claude Code (print mode). SOLTELU is the
+  model/effort router for Codex; Claude Code turns use its own default model
+  unless a Claude model name is given, and have no mid-turn approval requests.
 - MCP servers discovered in the Codex config are names-only inventory; actual
   MCP execution stays inside the observable Codex approval flow.
 - OpenCrab is never ingested silently. Its configured MCP connection and

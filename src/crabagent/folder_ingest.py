@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from .runner_pipeline import RunnerPipeline, RunnerPipelineError
+
 
 class FolderIngestError(RuntimeError):
     """A local folder could not be staged or the remote operation was refused."""
@@ -312,10 +314,83 @@ class OpenCrabPackBuilder:
         workspace: Path,
         *,
         tool_name: Optional[str] = None,
+        pipeline: Optional[RunnerPipeline] = None,
     ) -> None:
         self.client_factory = client_factory
         self.workspace = workspace.resolve()
         self.tool_name = str(tool_name or os.environ.get("OPENCRAB_CRAB_AGENT_TOOL") or "opencrab_crab_agent")
+        self.pipeline = pipeline or RunnerPipeline(tool_name=self.tool_name)
+
+    def build_with_runner(
+        self,
+        folder: Path,
+        *,
+        project_id: str = "",
+        project_name: str = "",
+        ontology_purpose: str = "",
+        run_id: Optional[str] = None,
+        semantic_layer: str = "full",
+        origin: str = "",
+        judgments_path: Optional[Path] = None,
+        judge: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+    ) -> Dict[str, Any]:
+        """Build the pack locally with the release runner (Kordoc parsing, OCR, vectors) and upload it.
+
+        Status is upload_pending until OpenCrab returns a package_id for the upload session.
+        With ``judge``, the runner's judgment request is answered by an LLM and the pack is
+        rebuilt with those decisions, actions and risks.
+        """
+        folder = folder.resolve()
+        staged = stage_folder(folder, self.workspace / ".crabagent" / "pack-runs", run_id=run_id)
+        stage = Path(str(staged["stage_path"]))
+        pack_name = "%s ontology pack" % (project_name.strip() or folder.name)
+        purpose = ontology_purpose.strip() or "Build an evidence-first ontology pack from this folder for OpenCrab retrieval and reasoning."
+        try:
+            client = self.client_factory()
+            account = client.call_tool("opencrab_status", {})
+        except Exception as exc:
+            return self._result(staged, "mcp_unavailable", str(exc), builder="runner")
+        tier = str(account.get("tier") or "").lower()
+        if not is_expert_tier(tier):
+            return self._result(staged, "expert_required", "Expert tier is required for local-folder pack build and ingest", tier=tier, builder="runner")
+        steps: Dict[str, Any] = {}
+        try:
+            steps["runner"] = self.pipeline.ensure_runner(client)
+            runner = steps["runner"]["path"]
+            output_zip = stage / "opencrab-pack.zip"
+            options = {"title": pack_name, "purpose": purpose, "semantic_layer": semantic_layer}
+            steps["build"] = self.pipeline.build(runner, folder, output_zip, judgments=judgments_path, **options)
+            if judge is not None and judgments_path is None and steps["build"].get("judgment_request"):
+                request = json.loads(Path(steps["build"]["judgment_request"]).read_text(encoding="utf-8"))
+                judged = judge(request)
+                if judged and judged.get("judgments"):
+                    judged_path = stage / "judgments.json"
+                    judged_path.write_text(json.dumps(judged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    steps["judgments"] = {"path": str(judged_path), "count": len(judged["judgments"])}
+                    steps["build"] = self.pipeline.build(runner, folder, output_zip, judgments=judged_path, **options)
+            self.pipeline.verify(runner, output_zip)
+            steps["verify"] = "pass"
+            session = self.pipeline.create_session(client, pack_name=pack_name, purpose=purpose, project_id=project_id, project_name=project_name, origin=origin)
+            steps["upload"] = self.pipeline.upload(session, output_zip)
+        except RunnerPipelineError as exc:
+            return self._result(staged, "local_build_failed", str(exc), tier=tier, builder="runner", steps=steps)
+        except Exception as exc:
+            return self._result(staged, "mcp_call_failed", str(exc), tier=tier, builder="runner", steps=steps)
+        return self._result(
+            staged,
+            "upload_pending",
+            "The pack ZIP was uploaded and queued; OpenCrab has not returned a package_id yet.",
+            tier=tier,
+            builder="runner",
+            pack_name=pack_name,
+            output_zip=str(output_zip),
+            upload_session_id=session["upload_session_id"],
+            runner_version=steps["runner"].get("version"),
+            semantic_layer=semantic_layer,
+            origin=origin or None,
+            steps=steps,
+            next_action="Poll `crab pack status %s` until OpenCrab returns the package_id." % staged["run_id"],
+        )
 
     def build_and_ingest(
         self,
