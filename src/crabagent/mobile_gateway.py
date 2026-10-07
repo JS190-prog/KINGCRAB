@@ -24,6 +24,10 @@ def ensure_pairing(workspace: Path) -> Dict[str, Any]:
     path = _pair_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         value = {}

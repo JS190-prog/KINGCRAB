@@ -311,6 +311,17 @@ class ColonyStore:
         finally:
             connection.close()
 
+    def _restrict_permissions(self, config: Path) -> None:
+        """Keep the colony database, its WAL files and the config readable only by this user."""
+        targets = [(self.home, 0o700), (self.artifacts_dir, 0o700), (config, 0o600), (self.database, 0o600)]
+        targets += [(Path(str(self.database) + suffix), 0o600) for suffix in ("-wal", "-shm")]
+        for path, mode in targets:
+            try:
+                if path.exists():
+                    path.chmod(mode)
+            except OSError:
+                pass
+
     def initialize(self) -> Dict[str, str]:
         first_initialize = not self.database.exists()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -382,6 +393,7 @@ class ColonyStore:
                 + "\n",
                 encoding="utf-8",
             )
+        self._restrict_permissions(config)
         if first_initialize:
             self.append_event(None, "workspace_initialized", "SYSTEM", {"workspace": str(self.workspace)})
         return {"workspace": str(self.workspace), "database": str(self.database), "config": str(config)}

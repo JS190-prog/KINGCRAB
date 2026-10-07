@@ -132,8 +132,17 @@ def write_endpoint(workspace: Path, endpoint: str) -> str:
     normalized = normalize_endpoint(endpoint)
     target = workspace.resolve() / ".crabagent" / "opencrab" / "endpoint.json"
     target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        (workspace.resolve() / ".crabagent").chmod(0o700)
+        target.parent.chmod(0o700)
+    except OSError:
+        pass
     temporary = target.with_suffix(".tmp")
     temporary.write_text(json.dumps({"endpoint": normalized, "updated_at": _now()}, indent=2) + "\n", encoding="utf-8")
+    try:
+        temporary.chmod(0o600)
+    except OSError:
+        pass
     temporary.replace(target)
     return normalized
 

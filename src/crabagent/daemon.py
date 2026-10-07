@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import hashlib
 import os
@@ -40,7 +41,7 @@ from .onboarding import (
     write_endpoint,
 )
 from .orchestration import OrchestrationStore, normalize_children, orchestration_id, summarize, utc_now
-from .protocol import USE_UNIX_SOCKET, runtime_paths, runtime_revision
+from .protocol import USE_UNIX_SOCKET, runtime_auth_token, runtime_paths, runtime_revision, secure_runtime_paths
 from .runtime import RuntimeService
 from .release_provenance import current_release_provenance
 from .workspace_defaults import default_workspace, is_legacy_tb_scratch_root
@@ -114,6 +115,10 @@ class RuntimeRequestHandler(socketserver.StreamRequestHandler):
         try:
             raw = self.rfile.readline(1024 * 1024)
             request = json.loads(raw.decode("utf-8"))
+            expected = str(getattr(self.server, "auth_token", ""))
+            supplied = str(request.get("auth") or "")
+            if not expected or not hmac.compare_digest(expected, supplied):
+                raise PermissionError("invalid crabd runtime auth")
             result = self.server.dispatch(request)  # type: ignore[attr-defined]
             response = {"ok": True, "result": result}
         except Exception as exc:
@@ -245,6 +250,7 @@ class RuntimeServer(_RuntimeServerBase):
 
     def __init__(self, workspace: Path, socket_path: Path, *, opencrab_inspector: Optional[OpenCrabInspector] = None, pack_builder: Optional[OpenCrabPackBuilder] = None) -> None:
         self.workspace = workspace.resolve()
+        self.auth_token = runtime_auth_token(self.workspace, create=True)
         self._endpoint_path = runtime_paths(self.workspace)["endpoint"]
         self.service = RuntimeService(self.workspace)
         self.service.initialize()
@@ -1970,14 +1976,24 @@ def run(
 ) -> None:
     """Run crabd in the foreground."""
     paths = runtime_paths(workspace)
-    paths["root"].mkdir(parents=True, exist_ok=True)
+    secure_runtime_paths(paths)
+    runtime_auth_token(workspace, create=True)
     socket_path = paths["socket"]
     if socket_path.exists():
         socket_path.unlink()
     paths["pid"].write_text(str(os.getpid()) + "\n", encoding="utf-8")
+    try:
+        paths["pid"].chmod(0o600)
+    except OSError:
+        pass
     server: Optional[RuntimeServer] = None
     try:
         server = RuntimeServer(workspace, socket_path)
+        if USE_UNIX_SOCKET:
+            try:
+                socket_path.chmod(0o600)
+            except OSError:
+                pass
 
         def stop_server(_signum: int, _frame: Any) -> None:
             if server is not None:
