@@ -103,6 +103,56 @@ def ingest_folder(
         console.print("No remote ingest is claimed without an observed OpenCrab MCP confirmation.")
 
 
+@pack_app.command("build")
+def build_folder(
+    folder_path: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True, readable=True, resolve_path=True),
+    project_id: str = typer.Option("", "--project-id", help="Existing CrabAgent project ID."),
+    project_name: str = typer.Option("", "--project-name", help="Create or use a local project name."),
+    ontology_purpose: str = typer.Option("", "--purpose", help="Purpose of the ontology pack; a safe default is used when omitted."),
+    semantic_layer: str = typer.Option("full", "--semantic-layer", help="full: claim/person/time/concept nodes per sentence; lean: topics, documents and evidence only."),
+    origin: str = typer.Option("", "--origin", help="source or ai_generated: who wrote the documents."),
+    judgments: Optional[Path] = typer.Option(None, "--judgments", exists=True, dir_okay=False, resolve_path=True, help="Prepared judgments JSON for the runner."),
+    judge: bool = typer.Option(False, "--judge", help="Let the WORKER model write the decisions, actions and risks, then rebuild with them."),
+    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", resolve_path=True),
+) -> None:
+    """Build a pack on this machine (PDF, HWP/HWPX, Office via Kordoc; OCR) and upload it to OpenCrab."""
+    if semantic_layer not in {"full", "lean"}:
+        console.print("--semantic-layer must be full or lean")
+        raise typer.Exit(code=2)
+    if origin and origin not in {"source", "ai_generated"}:
+        console.print("--origin must be source or ai_generated")
+        raise typer.Exit(code=2)
+    result = start_daemon(workspace).request(
+        "pack.ingest",
+        builder="runner",
+        folder_path=str(folder_path),
+        project_id=project_id,
+        project_name=project_name,
+        ontology_purpose=ontology_purpose,
+        semantic_layer=semantic_layer,
+        origin=origin,
+        judgments_path=str(judgments) if judgments else "",
+        judge=judge,
+    )
+    status = str(result.get("status") or "unknown")
+    console.print("Pack build status: %s" % status)
+    steps = result.get("steps") or {}
+    if steps.get("runner"):
+        console.print("Runner: %s" % steps["runner"].get("version", ""))
+    if steps.get("build"):
+        console.print("ZIP: %s (%s bytes)" % (steps["build"].get("output_zip", ""), steps["build"].get("zip_bytes", 0)))
+    if steps.get("judgments"):
+        console.print("Model judgments: %s" % steps["judgments"].get("count", 0))
+    if result.get("upload_session_id"):
+        console.print("Upload session: %s" % result["upload_session_id"])
+    if result.get("reason"):
+        console.print("Reason: %s" % result["reason"])
+    if status == "upload_pending":
+        console.print("Watching the upload in the background. Check with: crab pack status %s" % result.get("run_id", "RUN_ID"))
+    elif status != "ingested":
+        raise typer.Exit(code=1)
+
+
 @pack_app.command("status")
 def pack_status(
     run_id: str = typer.Argument(..., help="Pack ingest run ID returned by `crab pack ingest`."),
@@ -246,6 +296,54 @@ def mobile_start(
         gateway.serve_forever(host, port)
     except KeyboardInterrupt:
         console.print("Mobile gateway stopped")
+
+
+@app.command("doctor")
+def doctor(
+    install: bool = typer.Option(False, "--install", help="Install the runner Python packages and Kordoc 4.x."),
+    raw_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Check what local pack builds and model providers need."""
+    from .doctor import diagnose, install_missing
+
+    if install:
+        for step in install_missing():
+            console.print("install %s: exit %s" % (step["step"], step.get("exit_code")))
+    report = diagnose()
+    if raw_json:
+        console.print_json(json.dumps(report, ensure_ascii=False))
+        return
+    table = Table(title="KINGCRAB doctor (%s)" % report["status"])
+    for column in ("check", "status", "detail", "fix"):
+        table.add_column(column)
+    for row in report["checks"]:
+        table.add_row(row["name"], row["status"], row["detail"], row["fix"])
+    console.print(table)
+    if report["status"] != "ready":
+        raise typer.Exit(code=1)
+
+
+@app.command("provider")
+def provider(
+    name: str = typer.Argument("", help="codex or claude; empty shows the current choice."),
+) -> None:
+    """Choose the model provider for new sessions (Codex or Claude Code)."""
+    from .daemon import provider_file, saved_provider, select_provider
+
+    if name:
+        if name not in {"codex", "claude"}:
+            console.print("provider must be codex or claude")
+            raise typer.Exit(code=2)
+        path = provider_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(name + "\n", encoding="utf-8")
+        console.print("Provider set to %s (applies to sessions opened after the runtime restarts: `crab stop`)." % name)
+    try:
+        chosen, executable = select_provider()
+        console.print("Active provider: %s (%s)  saved: %s" % (chosen, executable, saved_provider() or "-"))
+    except RuntimeError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=1)
 
 
 @app.command("setup")

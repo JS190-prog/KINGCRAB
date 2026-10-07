@@ -851,3 +851,41 @@ def test_folder_project_and_new_conversation_are_durable(tmp_path: Path) -> None
         server.server_close()
         if paths["socket"].exists():
             paths["socket"].unlink()
+
+
+def test_bridge_is_rebuilt_only_when_the_provider_changes(tmp_path: Path, monkeypatch) -> None:
+    import crabagent.daemon as daemon
+
+    class FakeBridge:
+        def __init__(self, *args, **kwargs) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeCodex(FakeBridge):
+        pass
+
+    class FakeClaude(FakeBridge):
+        pass
+
+    chosen = {"name": "codex"}
+    monkeypatch.setattr(daemon, "CodexAppServerSession", FakeCodex)
+    monkeypatch.setattr(daemon, "ClaudeCodeSession", FakeClaude)
+    monkeypatch.setattr(daemon, "mcp_inventory", lambda: [])
+    monkeypatch.setattr(daemon, "select_provider", lambda requested="": (chosen["name"], "/bin/" + chosen["name"]))
+    paths = runtime_paths(tmp_path)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    server = RuntimeServer(tmp_path, paths["socket"])
+    try:
+        session = {"session_id": "s1", "executor_policy": "codex"}
+        first = server._bridge(session)
+        assert isinstance(first, FakeCodex)
+        assert server._bridge(session) is first  # same provider: reused
+        chosen["name"] = "claude"
+        second = server._bridge(session)
+        assert isinstance(second, FakeClaude)
+        assert first.closed  # previous provider's bridge is released
+        assert server._bridge(session) is second
+    finally:
+        server.server_close()
