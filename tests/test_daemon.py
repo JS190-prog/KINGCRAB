@@ -889,3 +889,100 @@ def test_bridge_is_rebuilt_only_when_the_provider_changes(tmp_path: Path, monkey
         assert server._bridge(session) is second
     finally:
         server.server_close()
+
+
+def _wait_for_pack_status(server, run_id: str, status: str, timeout: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout
+    record = {}
+    while time.monotonic() < deadline:
+        record = server.service.store.pack_ingest_run(run_id) or {}
+        if record.get("status") == status:
+            return record
+        time.sleep(0.01)
+    return record
+
+
+def test_daemon_start_resumes_watching_pending_uploads(tmp_path: Path, monkeypatch) -> None:
+    import crabagent.daemon as daemon
+    from crabagent.store import ColonyStore
+
+    monkeypatch.setattr(daemon, "PACK_WATCH_FIRST_INTERVAL", 0.001)
+    store = ColonyStore(tmp_path)
+    store.initialize()
+    pending = {"status": "upload_pending", "upload_session_id": "upl-1", "run_id": "packrun-resume"}
+    store.record_pack_ingest_run("packrun-resume", "", str(tmp_path), "upload_pending", pending)
+
+    class Builder:
+        def poll_upload(self, session_id: str):
+            assert session_id == "upl-1"
+            return {"status": "completed", "package_id": "pkg-1"}
+
+    paths = runtime_paths(tmp_path)
+    server = RuntimeServer(tmp_path, paths["socket"], pack_builder=Builder())
+    try:
+        record = _wait_for_pack_status(server, "packrun-resume", "ingested")
+        assert record.get("status") == "ingested"
+        assert record["result"]["package_id"] == "pkg-1"
+    finally:
+        server.server_close()
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
+def test_pack_watch_outlasts_long_staged_processing_and_transient_errors(tmp_path: Path, monkeypatch) -> None:
+    import crabagent.daemon as daemon
+    from crabagent.store import ColonyStore
+
+    monkeypatch.setattr(daemon, "PACK_WATCH_FIRST_INTERVAL", 0.001)
+    monkeypatch.setattr(daemon, "PACK_WATCH_MAX_INTERVAL", 0.001)
+    store = ColonyStore(tmp_path)
+    store.initialize()
+    pending = {"status": "upload_pending", "upload_session_id": "upl-2", "run_id": "packrun-long"}
+    store.record_pack_ingest_run("packrun-long", "", str(tmp_path), "upload_pending", pending)
+
+    class Builder:
+        calls = 0
+
+        def poll_upload(self, session_id: str):
+            Builder.calls += 1
+            if Builder.calls < 45:  # well past the old 30-poll limit
+                if Builder.calls % 10 == 0:
+                    return {"status": "mcp_unavailable", "reason": "connection dropped"}
+                return {"status": "processing", "stage": "embedding"}
+            return {"status": "completed", "package_id": "pkg-2"}
+
+    paths = runtime_paths(tmp_path)
+    server = RuntimeServer(tmp_path, paths["socket"], pack_builder=Builder())
+    try:
+        record = _wait_for_pack_status(server, "packrun-long", "ingested")
+        assert record.get("status") == "ingested"
+        assert Builder.calls >= 45
+    finally:
+        server.server_close()
+        if paths["socket"].exists():
+            paths["socket"].unlink()
+
+
+def test_pack_status_restarts_a_watch_for_a_still_pending_upload(tmp_path: Path, monkeypatch) -> None:
+    import crabagent.daemon as daemon
+
+    monkeypatch.setattr(daemon, "PACK_WATCH_FIRST_INTERVAL", 0.001)
+    responses = iter([{"status": "processing"}])
+
+    class Builder:
+        def poll_upload(self, session_id: str):
+            return next(responses, {"status": "completed", "package_id": "pkg-3"})
+
+    paths = runtime_paths(tmp_path)
+    server = RuntimeServer(tmp_path, paths["socket"], pack_builder=Builder())
+    try:
+        pending = {"status": "upload_pending", "upload_session_id": "upl-3", "run_id": "packrun-status"}
+        server.service.store.record_pack_ingest_run("packrun-status", "", str(tmp_path), "upload_pending", pending)
+        first = server.dispatch({"action": "pack.ingest.status", "payload": {"run_id": "packrun-status"}})
+        assert first["status"] == "upload_pending"
+        record = _wait_for_pack_status(server, "packrun-status", "ingested")
+        assert record.get("status") == "ingested"
+    finally:
+        server.server_close()
+        if paths["socket"].exists():
+            paths["socket"].unlink()

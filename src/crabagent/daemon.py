@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import hashlib
 import os
@@ -40,7 +41,7 @@ from .onboarding import (
     write_endpoint,
 )
 from .orchestration import OrchestrationStore, normalize_children, orchestration_id, summarize, utc_now
-from .protocol import USE_UNIX_SOCKET, runtime_paths, runtime_revision
+from .protocol import USE_UNIX_SOCKET, runtime_auth_token, runtime_paths, runtime_revision, secure_runtime_paths
 from .runtime import RuntimeService
 from .release_provenance import current_release_provenance
 from .workspace_defaults import default_workspace, is_legacy_tb_scratch_root
@@ -114,6 +115,10 @@ class RuntimeRequestHandler(socketserver.StreamRequestHandler):
         try:
             raw = self.rfile.readline(1024 * 1024)
             request = json.loads(raw.decode("utf-8"))
+            expected = str(getattr(self.server, "auth_token", ""))
+            supplied = str(request.get("auth") or "")
+            if not expected or not hmac.compare_digest(expected, supplied):
+                raise PermissionError("invalid crabd runtime auth")
             result = self.server.dispatch(request)  # type: ignore[attr-defined]
             response = {"ok": True, "result": result}
         except Exception as exc:
@@ -239,12 +244,20 @@ else:
     _RuntimeServerBase = socketserver.ThreadingTCPServer
 
 
+PACK_TERMINAL_STATUSES = {"ingested", "upload_failed", "cancelled"}
+PACK_WATCH_FIRST_INTERVAL = 2.0
+PACK_WATCH_MAX_INTERVAL = 60.0
+
+
 class RuntimeServer(_RuntimeServerBase):
     daemon_threads = True
+    # How long one background watch follows an upload before leaving it to the next start.
+    pack_watch_window = 6 * 60 * 60.0
     allow_reuse_address = True
 
     def __init__(self, workspace: Path, socket_path: Path, *, opencrab_inspector: Optional[OpenCrabInspector] = None, pack_builder: Optional[OpenCrabPackBuilder] = None) -> None:
         self.workspace = workspace.resolve()
+        self.auth_token = runtime_auth_token(self.workspace, create=True)
         self._endpoint_path = runtime_paths(self.workspace)["endpoint"]
         self.service = RuntimeService(self.workspace)
         self.service.initialize()
@@ -278,6 +291,7 @@ class RuntimeServer(_RuntimeServerBase):
                 + "\n",
                 encoding="utf-8",
             )
+        self._resume_pack_upload_watches()
 
     def server_close(self) -> None:
         self._pack_watch_stop.set()
@@ -336,7 +350,13 @@ class RuntimeServer(_RuntimeServerBase):
         return self.service.store.pack_ingest_run(str(record["run_id"])) or record
 
     def _start_pack_upload_watch(self, record: Dict[str, Any]) -> None:
-        """Keep a short, durable background watch independent of the TUI panel."""
+        """Watch an uploaded pack in the background until OpenCrab settles it.
+
+        OpenCrab processes an upload in resumable stages, so the watch backs off
+        from a short to a long interval and keeps going for a long window. A run
+        still pending when the window ends, or when crabd stops, is picked up
+        again on the next daemon start or `crab pack status`.
+        """
         run_id = str(record.get("run_id") or "")
         saved = record.get("result") or {}
         remote = saved.get("remote") or {}
@@ -354,27 +374,24 @@ class RuntimeServer(_RuntimeServerBase):
 
             def watch() -> None:
                 try:
-                    # The local builder/upload handoff may require user action;
-                    # watch for a bounded window and leave the durable record
-                    # available for an explicit `crab pack status` afterwards.
-                    for _ in range(30):
-                        if self._pack_watch_stop.is_set():
+                    interval = PACK_WATCH_FIRST_INTERVAL
+                    deadline = time.monotonic() + self.pack_watch_window
+                    while time.monotonic() < deadline:
+                        if self._pack_watch_stop.wait(interval):
                             return
-                        time.sleep(2.0)
-                        if self._pack_watch_stop.is_set():
-                            return
+                        interval = min(interval * 2, PACK_WATCH_MAX_INTERVAL)
                         current = self.service.store.pack_ingest_run(run_id)
                         if current is None:
                             return
-                        current_status = str(current.get("status") or "")
-                        if current_status in {"ingested", "upload_failed", "cancelled"}:
+                        if str(current.get("status") or "") in PACK_TERMINAL_STATUSES:
                             return
                         observed = self._observe_pack_upload(current, upload_session_id)
-                        if str(observed.get("status") or "") in {"ingested", "upload_failed", "cancelled"}:
+                        if str(observed.get("status") or "") in PACK_TERMINAL_STATUSES:
                             return
                 finally:
                     with self._state_lock:
-                        self._pack_watchers.pop(run_id, None)
+                        if self._pack_watchers.get(run_id) is threading.current_thread():
+                            self._pack_watchers.pop(run_id, None)
 
             watcher = threading.Thread(
                 target=watch,
@@ -383,6 +400,11 @@ class RuntimeServer(_RuntimeServerBase):
             )
             self._pack_watchers[run_id] = watcher
             watcher.start()
+
+    def _resume_pack_upload_watches(self) -> None:
+        """Resume watching uploads that were still pending when crabd last stopped."""
+        for record in self.service.store.pending_pack_ingest_runs():
+            self._start_pack_upload_watch(record)
 
     def _session(self, session_id: str = "", project_root_path: str = "") -> Dict[str, Any]:
         session = self.service.store.session(session_id) if session_id else self.service.store.latest_session()
@@ -1760,7 +1782,10 @@ class RuntimeServer(_RuntimeServerBase):
             )
             if not upload_session_id:
                 return record
-            return self._observe_pack_upload(record, upload_session_id)
+            observed = self._observe_pack_upload(record, upload_session_id)
+            if str(observed.get("status") or "") == "upload_pending":
+                self._start_pack_upload_watch(observed)
+            return observed
         if action == "conversation.export":
             session = self._session(str(payload.get("session_id") or ""))
             total = self.service.store.message_count(str(session["session_id"]))
@@ -1970,14 +1995,24 @@ def run(
 ) -> None:
     """Run crabd in the foreground."""
     paths = runtime_paths(workspace)
-    paths["root"].mkdir(parents=True, exist_ok=True)
+    secure_runtime_paths(paths)
+    runtime_auth_token(workspace, create=True)
     socket_path = paths["socket"]
     if socket_path.exists():
         socket_path.unlink()
     paths["pid"].write_text(str(os.getpid()) + "\n", encoding="utf-8")
+    try:
+        paths["pid"].chmod(0o600)
+    except OSError:
+        pass
     server: Optional[RuntimeServer] = None
     try:
         server = RuntimeServer(workspace, socket_path)
+        if USE_UNIX_SOCKET:
+            try:
+                socket_path.chmod(0o600)
+            except OSError:
+                pass
 
         def stop_server(_signum: int, _frame: Any) -> None:
             if server is not None:

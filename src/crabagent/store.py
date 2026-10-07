@@ -311,6 +311,17 @@ class ColonyStore:
         finally:
             connection.close()
 
+    def _restrict_permissions(self, config: Path) -> None:
+        """Keep the colony database, its WAL files and the config readable only by this user."""
+        targets = [(self.home, 0o700), (self.artifacts_dir, 0o700), (config, 0o600), (self.database, 0o600)]
+        targets += [(Path(str(self.database) + suffix), 0o600) for suffix in ("-wal", "-shm")]
+        for path, mode in targets:
+            try:
+                if path.exists():
+                    path.chmod(mode)
+            except OSError:
+                pass
+
     def initialize(self) -> Dict[str, str]:
         first_initialize = not self.database.exists()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -382,6 +393,7 @@ class ColonyStore:
                 + "\n",
                 encoding="utf-8",
             )
+        self._restrict_permissions(config)
         if first_initialize:
             self.append_event(None, "workspace_initialized", "SYSTEM", {"workspace": str(self.workspace)})
         return {"workspace": str(self.workspace), "database": str(self.database), "config": str(config)}
@@ -699,6 +711,14 @@ class ColonyStore:
         except (TypeError, ValueError):
             result["result"] = {}
         return result
+
+    def pending_pack_ingest_runs(self) -> List[Dict[str, Any]]:
+        """Runs uploaded to OpenCrab that have not yet reached package_id or a failure."""
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT run_id FROM pack_ingest_runs WHERE status = 'upload_pending' ORDER BY updated_at",
+            ).fetchall()
+        return [run for run in (self.pack_ingest_run(str(row["run_id"])) for row in rows) if run is not None]
 
     def list_pack_ingest_runs(self, limit: int = 20) -> List[Dict[str, Any]]:
         with self.connection() as connection:

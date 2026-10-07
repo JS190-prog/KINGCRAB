@@ -20,6 +20,13 @@ local `crabd` runtime, Codex integration, and onboarding flow run unchanged
 inside an Ubuntu WSL2 environment. Native Windows and standalone Linux are
 not currently supported or verified.
 
+`crabd` accepts only requests that carry the workspace token in
+`.crabagent/runtime-auth.json` (mode 0600). Its socket lives in the private
+`/tmp/crabagent-<uid>/` directory (or `CRABAGENT_RUNTIME_DIR`), and the
+workspace state, colony database, config, pid and log files are readable only
+by their owner. The first start after upgrading stops a daemon still bound to
+the old `/tmp/crabagent-<hash>.sock` path.
+
 ## Role system
 
 | Role | Responsibility | SOLTELU route |
@@ -535,7 +542,11 @@ crab pack status PACKRUN_ID
    (`create_upload_session`, with `--origin` when given), uploads the ZIP to the
    signed URL and finalizes it with the session token.
 5. Reports `upload_pending` and keeps the background watch; only a returned
-   `package_id` makes the run `ingested`.
+   `package_id` makes the run `ingested`. OpenCrab processes uploads in
+   resumable stages, so the watch backs off from 2 s to 60 s between polls and
+   follows a run for up to six hours. A run still pending when crabd stops is
+   watched again on the next daemon start, and `crab pack status` restarts the
+   watch for a pending run.
 
 `--semantic-layer lean` keeps topics, documents and evidence and skips the
 per-sentence claim, concept, person and time nodes; use it when the structure
