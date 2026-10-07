@@ -712,6 +712,14 @@ class ColonyStore:
             result["result"] = {}
         return result
 
+    def pending_pack_ingest_runs(self) -> List[Dict[str, Any]]:
+        """Runs uploaded to OpenCrab that have not yet reached package_id or a failure."""
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT run_id FROM pack_ingest_runs WHERE status = 'upload_pending' ORDER BY updated_at",
+            ).fetchall()
+        return [run for run in (self.pack_ingest_run(str(row["run_id"])) for row in rows) if run is not None]
+
     def list_pack_ingest_runs(self, limit: int = 20) -> List[Dict[str, Any]]:
         with self.connection() as connection:
             rows = connection.execute(
