@@ -409,7 +409,12 @@ class RuntimeServer(_RuntimeServerBase):
             project_root = self.workspace
         with self._state_lock:
             bridge = self._bridges.get(session_id)
-            expected_type = HostModelSession if executor_policy == "host" else (CodexAppServerSession, ClaudeCodeSession)
+            provider, executable = "", ""
+            if executor_policy == "host":
+                expected_type = HostModelSession
+            else:
+                provider, executable = select_provider(str(session.get("provider") or ""))
+                expected_type = ClaudeCodeSession if provider == "claude" else CodexAppServerSession
             if bridge is not None and not isinstance(bridge, expected_type):
                 bridge.close()
                 self._bridges.pop(session_id, None)
@@ -422,7 +427,6 @@ class RuntimeServer(_RuntimeServerBase):
                         project_root=str(project_root.resolve()),
                     )
                 else:
-                    provider, executable = select_provider(str(session.get("provider") or ""))
                     saved_thread = str(session.get("codex_thread_id") or "")
                     if provider == "claude":
                         bridge = ClaudeCodeSession(
